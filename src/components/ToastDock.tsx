@@ -89,7 +89,7 @@ export function ToastDock() {
       {toasts.map((toast) => {
         const progress = (toast.timeLeft / TOAST_DURATION) * 100;
         const isEntering = toast.timeLeft === TOAST_DURATION;
-        const translateY = isEntering ? -60 : 0;
+        const translateX = isEntering ? 400 : 0;
         const fadeWindow = 200;
         const opacity =
           toast.timeLeft > fadeWindow ? 1 : Math.max(0, toast.timeLeft / fadeWindow);
@@ -99,7 +99,7 @@ export function ToastDock() {
             key={toast.id}
             className="pointer-events-auto bg-white rounded-xl shadow-2xl border border-blue-100 w-96 max-w-[90vw] overflow-hidden transition-all duration-300"
             style={{
-              transform: `translateY(${translateY}px)`,
+              transform: `translateX(${translateX}px)`,
               opacity,
             }}
             onMouseEnter={() => handlePause(toast.id, true)}
