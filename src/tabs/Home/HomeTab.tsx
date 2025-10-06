@@ -55,7 +55,7 @@ export default function HomeTab() {
   };
 
   return (
-    <div className="flex flex-col">
+    <div className="flex flex-col h-full">
       <div className="mb-6">
         <h1 className="text-4xl font-bold text-gray-800 font-quicksand mb-2">
           Hi, David
