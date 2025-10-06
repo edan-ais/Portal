@@ -68,9 +68,9 @@ export default function NotificationPanel({ isOpen, onClose, onNavigate }: Notif
             onClick={onClose}
           />
           <motion.div
-            initial={{ opacity: 0, y: -20, scale: 0.95 }}
-            animate={{ opacity: 1, y: 0, scale: 1 }}
-            exit={{ opacity: 0, y: -20, scale: 0.95 }}
+            initial={{ opacity: 0, x: 400 }}
+            animate={{ opacity: 1, x: 0 }}
+            exit={{ opacity: 0, x: 400 }}
             transition={{ type: 'spring', damping: 25, stiffness: 300 }}
             className="fixed top-20 bottom-16 right-8 w-96 bg-white rounded-2xl shadow-2xl border border-blue-100 z-50 flex flex-col"
             onClick={(e) => e.stopPropagation()}
