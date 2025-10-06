@@ -751,7 +751,7 @@ export default function LabelsTab() {
 
   // ------ UI ------
   return (
-    <div className="h-full flex flex-col space-y-6">
+    <div className="flex flex-col space-y-6">
       {/* ===== Header Bar (monitor + refresh + run + save + autosave tracker + trash) ===== */}
       <div className="flex items-center justify-between">
         {/* Left: Title */}
