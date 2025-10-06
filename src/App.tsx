@@ -73,38 +73,43 @@ function App() {
   };
 
   return (
-    <div className="min-h-screen bg-gray-50">
+    <div className="h-screen flex flex-col bg-gray-50 overflow-hidden">
       <TopBar
         onNotificationClick={() => setShowNotifications(!showNotifications)}
         onLogoClick={() => setActiveTab('home')}
         unreadCount={unreadCount}
       />
-      <Sidebar
-        activeTab={activeTab}
-        onTabChange={setActiveTab}
-        tabs={tabs}
-        onTabOrderChange={handleTabOrderChange}
-      />
-      <NotificationPanel
-        isOpen={showNotifications}
-        onClose={() => setShowNotifications(false)}
-        onNavigate={handleNotificationNavigate}
-      />
-      <main className="ml-64 mt-16 mb-12 p-8 min-h-[calc(100vh-7rem)]">
-        <div className="max-w-7xl mx-auto">
-          <AnimatePresence mode="wait">
-            <motion.div
-              key={activeTab}
-              initial={{ opacity: 0, y: 20 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: -20 }}
-              transition={{ duration: 0.3, ease: 'easeInOut' }}
-            >
-              {renderTab()}
-            </motion.div>
-          </AnimatePresence>
-        </div>
-      </main>
+      <div className="flex flex-1 overflow-hidden">
+        <Sidebar
+          activeTab={activeTab}
+          onTabChange={setActiveTab}
+          tabs={tabs}
+          onTabOrderChange={handleTabOrderChange}
+        />
+        <NotificationPanel
+          isOpen={showNotifications}
+          onClose={() => setShowNotifications(false)}
+          onNavigate={handleNotificationNavigate}
+        />
+        <main className="flex-1 overflow-y-auto">
+          <div className="h-full p-8">
+            <div className="max-w-7xl mx-auto h-full">
+              <AnimatePresence mode="wait">
+                <motion.div
+                  key={activeTab}
+                  initial={{ opacity: 0, y: 20 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, y: -20 }}
+                  transition={{ duration: 0.3, ease: 'easeInOut' }}
+                  className="h-full"
+                >
+                  {renderTab()}
+                </motion.div>
+              </AnimatePresence>
+            </div>
+          </div>
+        </main>
+      </div>
       <BottomBar />
     </div>
   );

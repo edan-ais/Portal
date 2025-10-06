@@ -751,7 +751,7 @@ export default function LabelsTab() {
 
   // ------ UI ------
   return (
-    <div className="space-y-6">
+    <div className="h-full flex flex-col space-y-6">
       {/* ===== Header Bar (monitor + refresh + run + save + autosave tracker + trash) ===== */}
       <div className="flex items-center justify-between">
         {/* Left: Title */}
@@ -884,7 +884,7 @@ export default function LabelsTab() {
 
       {/* ===== Content ===== */}
       {!selectedProduct && (
-        <>
+        <div className="flex-1 flex flex-col space-y-4 overflow-y-auto">
           {/* Actions over grid */}
           <div className="flex items-center gap-2">
             <button
@@ -975,12 +975,12 @@ export default function LabelsTab() {
               );
             })}
           </div>
-        </>
+        </div>
       )}
 
       {/* ===== Folder View ===== */}
       {selectedProduct && (
-        <div className="space-y-4">
+        <div className="flex-1 flex flex-col space-y-4 overflow-y-auto">
           {/* Folder header */}
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-2">
