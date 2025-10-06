@@ -79,8 +79,8 @@ function App() {
         onTabOrderChange={handleTabOrderChange}
       />
       <main className="fixed left-64 right-0 top-16 bottom-12 overflow-hidden flex flex-col">
-        <div className="flex-1 overflow-y-auto p-8">
-          <div className="max-w-7xl mx-auto h-full">
+        <div className="flex-1 overflow-y-auto px-8 pt-8">
+          <div className="max-w-7xl mx-auto h-full pb-8">
             <AnimatePresence mode="wait">
               <motion.div
                 key={activeTab}
