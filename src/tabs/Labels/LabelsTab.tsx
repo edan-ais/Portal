@@ -1,181 +1,749 @@
-import { useState, useEffect } from 'react';
-import { Tag, Plus, Trash2 } from 'lucide-react';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { Tag, Plus, Trash2, Folder, FolderArchive, UploadCloud, FileText, MoveRight, ShieldCheck, RefreshCcw, Eye, Printer, Save } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { supabase } from '../../lib/supabase';
 
-interface Label {
-  id: string;
+type UUID = string;
+
+interface Product {
+  id: UUID;
   name: string;
-  color: string;
-  description: string;
+  slug: string;
+  days_out: number;
+  folder_path: string; // e.g., "fudge/"
+  created_at?: string;
+}
+
+interface FileItem {
+  name: string;         // filename.pdf
+  path: string;         // productSlug/filename.pdf
+  id?: string;          // storage id (not always present)
+  signedUrl?: string;   // for viewing/printing
+  created_at?: string;
+  size?: number;
+  mimeType?: string;
+  isArchive?: boolean;
+}
+
+interface Profile {
+  id: UUID;
+  role?: string | null;
+}
+
+const LABELS_BUCKET = 'labels';
+
+function slugify(input: string) {
+  return input
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/(^-|-$)+/g, '');
+}
+
+/**
+ * Expiration Rule:
+ * - target = today + daysOut
+ * - Snap to the next anchor date at/after target: 1st or 5th of that month.
+ *   If target day <= 1 -> snap to the 1st
+ *   else if target day <= 5 -> snap to the 5th
+ *   else -> snap to the 1st of the next month
+ */
+function computeExpiry(daysOut: number, now = new Date()) {
+  const target = new Date(now);
+  target.setDate(target.getDate() + daysOut);
+
+  const y = target.getFullYear();
+  const m = target.getMonth();
+  const d = target.getDate();
+
+  if (d <= 1) return new Date(y, m, 1);
+  if (d <= 5) return new Date(y, m, 5);
+  // first of next month
+  return new Date(y, m + 1, 1);
+}
+
+function formatDate(d?: Date) {
+  if (!d) return '—';
+  return d.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
 }
 
 export default function LabelsTab() {
-  const [labels, setLabels] = useState<Label[]>([]);
+  // --- Top-level state ---
   const [loading, setLoading] = useState(true);
+  const [heartbeatOk, setHeartbeatOk] = useState<boolean | null>(null);
+  const [heartbeatAt, setHeartbeatAt] = useState<Date | null>(null);
+  const [products, setProducts] = useState<Product[]>([]);
+  const [selectedProductId, setSelectedProductId] = useState<UUID | null>(null);
+  const [files, setFiles] = useState<FileItem[]>([]);
   const [showForm, setShowForm] = useState(false);
-  const [formData, setFormData] = useState({
+  const [isAdmin, setIsAdmin] = useState(false);
+  const [pdfPreview, setPdfPreview] = useState<FileItem | null>(null);
+  const [autoSaving, setAutoSaving] = useState(false);
+  const [manualSaveDirty, setManualSaveDirty] = useState(false);
+
+  // New product form
+  const [productForm, setProductForm] = useState<{ name: string; days_out: number }>({
     name: '',
-    color: '#3b82f6',
-    description: '',
+    days_out: 60,
   });
 
-  const colorOptions = [
-    '#3b82f6', '#ef4444', '#10b981', '#f59e0b', '#8b5cf6',
-    '#ec4899', '#06b6d4', '#84cc16', '#f97316', '#6366f1'
-  ];
+  // Editable product settings (auto-save)
+  const [editBuffer, setEditBuffer] = useState<Record<UUID, { name: string; days_out: number }>>({});
 
+  const uploaderRef = useRef<HTMLInputElement | null>(null);
+
+  // --- Effects: Auth/Admin, bootstrap products, heartbeat, selection ---
   useEffect(() => {
-    fetchLabels();
+    (async () => {
+      setLoading(true);
+
+      // Admin check
+      const { data: sessionRes } = await supabase.auth.getSession();
+      const user = sessionRes?.session?.user;
+      let admin = false;
+      if (user?.app_metadata && (user.app_metadata as any)?.role === 'admin') {
+        admin = true;
+      } else if (user?.id) {
+        const { data: profile } = await supabase
+          .from('profiles')
+          .select('id, role')
+          .eq('id', user.id)
+          .maybeSingle<Profile>();
+        if (profile?.role === 'admin') admin = true;
+      }
+      setIsAdmin(admin);
+
+      // Load products; seed if empty
+      const { data: prod } = await supabase
+        .from('products')
+        .select('*')
+        .order('created_at', { ascending: true });
+      let list = prod ?? [];
+
+      if (!list || list.length === 0) {
+        // seed Fudge (60) and Rice Crispy Treats (75)
+        const seed: Partial<Product>[] = [
+          {
+            name: 'Fudge',
+            slug: 'fudge',
+            days_out: 60,
+            folder_path: 'fudge/',
+          },
+          {
+            name: 'Rice Crispy Treats',
+            slug: 'rice-crispy-treats',
+            days_out: 75,
+            folder_path: 'rice-crispy-treats/',
+          },
+        ];
+        const { data: inserted } = await supabase
+          .from('products')
+          .insert(seed)
+          .select('*');
+        list = inserted ?? [];
+      }
+
+      setProducts(list);
+      if (!selectedProductId && list.length) setSelectedProductId(list[0].id);
+
+      // initial heartbeat + schedule
+      await pingHeartbeat();
+      const iv = setInterval(pingHeartbeat, 30_000);
+      setLoading(false);
+      return () => clearInterval(iv);
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const fetchLabels = async () => {
-    const { data } = await supabase
-      .from('labels')
-      .select('*')
-      .order('created_at', { ascending: false });
-    if (data) setLabels(data);
-    setLoading(false);
+  // load files when product changes
+  useEffect(() => {
+    if (!selectedProductId) return;
+    const product = products.find((p) => p.id === selectedProductId);
+    if (product) {
+      void ensureArchivePlaceholder(product);
+      void loadFiles(product);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedProductId, products.length]);
+
+  // --- Heartbeat ---
+  const pingHeartbeat = async () => {
+    try {
+      // lightweight ping: count products
+      const { data, error } = await supabase.from('products').select('id', { count: 'exact', head: true });
+      if (error) throw error;
+      setHeartbeatOk(true);
+      setHeartbeatAt(new Date());
+    } catch {
+      setHeartbeatOk(false);
+    }
   };
 
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    await supabase.from('labels').insert([formData]);
-    setShowForm(false);
-    setFormData({
-      name: '',
-      color: '#3b82f6',
-      description: '',
+  // --- Helpers: Storage/Folders ---
+  async function ensureArchivePlaceholder(product: Product) {
+    // Supabase Storage is flat; "folders" exist when a file path includes them.
+    // We'll ensure an archive/ path exists by placing a tiny .keep if needed.
+    const archivePath = `${product.folder_path}archive/.keep`;
+    const { data: listed } = await supabase.storage.from(LABELS_BUCKET).list(`${product.folder_path}archive`, {
+      limit: 1,
     });
-    fetchLabels();
-  };
+    if (!listed || listed.length === 0) {
+      await supabase.storage.from(LABELS_BUCKET).upload(archivePath, new Blob([''], { type: 'text/plain' }), {
+        upsert: true,
+      });
+    }
+  }
 
-  const handleDelete = async (id: string) => {
-    await supabase.from('labels').delete().eq('id', id);
-    fetchLabels();
-  };
+  async function loadFiles(product: Product) {
+    // List root (product folder)
+    const [root, arch] = await Promise.all([
+      supabase.storage.from(LABELS_BUCKET).list(product.folder_path, { limit: 1000 }),
+      supabase.storage.from(LABELS_BUCKET).list(`${product.folder_path}archive`, { limit: 1000 }),
+    ]);
 
+    const toItems = (entries: any[], isArchive = false): FileItem[] =>
+      (entries || [])
+        .filter((e) => !e.name.endsWith('.keep'))
+        .map((e) => ({
+          name: e.name,
+          path: `${isArchive ? product.folder_path + 'archive/' : product.folder_path}${e.name}`,
+          created_at: e.created_at,
+          size: e.metadata?.size,
+          mimeType: e.metadata?.mimetype,
+          isArchive,
+        }));
+
+    setFiles([...(toItems(root?.data || [], false)), ...(toItems(arch?.data || [], true))]);
+    setPdfPreview(null);
+  }
+
+  async function signUrl(path: string) {
+    const { data } = await supabase.storage.from(LABELS_BUCKET).createSignedUrl(path, 60 * 10);
+    return data?.signedUrl || null;
+  }
+
+  async function openFile(file: FileItem) {
+    const url = await signUrl(file.path);
+    if (!url) return;
+    // If it's a PDF, load into preview; otherwise, open new tab
+    if ((file.mimeType && file.mimeType.includes('pdf')) || file.name.toLowerCase().endsWith('.pdf')) {
+      setPdfPreview({ ...file, signedUrl: url });
+    } else {
+      window.open(url, '_blank', 'noopener,noreferrer');
+    }
+  }
+
+  async function printFile(file: FileItem) {
+    const url = await signUrl(file.path);
+    if (!url) return;
+    // best effort: open the pdf in a new tab; the user can print from there
+    window.open(url, '_blank', 'noopener,noreferrer');
+  }
+
+  async function deleteFile(file: FileItem) {
+    await supabase.storage.from(LABELS_BUCKET).remove([file.path]);
+    const product = products.find((p) => p.id === selectedProductId);
+    if (product) await loadFiles(product);
+  }
+
+  async function moveToArchive(file: FileItem) {
+    const product = products.find((p) => p.id === selectedProductId);
+    if (!product) return;
+    const dest = `${product.folder_path}archive/${file.name}`;
+    // storage.move currently available in Supabase JS:
+    await supabase.storage.from(LABELS_BUCKET).move(file.path, dest);
+    await loadFiles(product);
+  }
+
+  // --- Upload ---
+  async function handleUpload(filesToUpload: FileList | null) {
+    if (!filesToUpload || !selectedProductId) return;
+    const product = products.find((p) => p.id === selectedProductId);
+    if (!product) return;
+
+    for (const f of Array.from(filesToUpload)) {
+      const dest = `${product.folder_path}${f.name}`;
+      await supabase.storage.from(LABELS_BUCKET).upload(dest, f, { upsert: true, contentType: f.type });
+    }
+    await loadFiles(product);
+  }
+
+  // Drag & drop
+  function onDrop(e: React.DragEvent<HTMLDivElement>) {
+    e.preventDefault();
+    e.stopPropagation();
+    handleUpload(e.dataTransfer.files);
+  }
+
+  function onDragOver(e: React.DragEvent<HTMLDivElement>) {
+    e.preventDefault();
+    e.stopPropagation();
+  }
+
+  // --- Product CRUD / edits ---
+  async function createProduct() {
+    const name = productForm.name.trim();
+    if (!name) return;
+    const slug = slugify(name);
+    const folder_path = `${slug}/`;
+    const days_out = Math.max(1, Math.floor(productForm.days_out || 1));
+    const { data: inserted } = await supabase
+      .from('products')
+      .insert([{ name, slug, days_out, folder_path }])
+      .select('*')
+      .single<Product>();
+    if (inserted) {
+      setProducts((p) => [...p, inserted]);
+      setSelectedProductId(inserted.id);
+      await ensureArchivePlaceholder(inserted);
+      await loadFiles(inserted);
+      setShowForm(false);
+      setProductForm({ name: '', days_out: 60 });
+    }
+  }
+
+  function bufferValue(pid: UUID, key: 'name' | 'days_out', value: string) {
+    setEditBuffer((prev) => {
+      const base = prev[pid] ?? {
+        name: products.find((p) => p.id === pid)?.name ?? '',
+        days_out: products.find((p) => p.id === pid)?.days_out ?? 60,
+      };
+      const next = {
+        ...base,
+        [key]: key === 'days_out' ? Number(value) || 0 : value,
+      };
+      return { ...prev, [pid]: next };
+    });
+    setManualSaveDirty(true);
+    // auto-save debounce
+    debounceSave(pid);
+  }
+
+  const debounceTimers = useRef<Record<UUID, any>>({});
+  function debounceSave(pid: UUID) {
+    if (debounceTimers.current[pid]) clearTimeout(debounceTimers.current[pid]);
+    debounceTimers.current[pid] = setTimeout(() => autoSave(pid), 1000);
+  }
+
+  async function autoSave(pid: UUID) {
+    const pending = editBuffer[pid];
+    if (!pending) return;
+    setAutoSaving(true);
+    const slug = slugify(pending.name || products.find((p) => p.id === pid)?.name || '');
+    const folder_path = `${slug}/`;
+    const { data: updated } = await supabase
+      .from('products')
+      .update({
+        name: pending.name,
+        days_out: Math.max(1, Math.floor(pending.days_out || 1)),
+        slug,
+        folder_path,
+      })
+      .eq('id', pid)
+      .select('*')
+      .single<Product>();
+    if (updated) {
+      setProducts((arr) => arr.map((p) => (p.id === pid ? updated : p)));
+    }
+    setAutoSaving(false);
+  }
+
+  async function manualSave(pid: UUID) {
+    await autoSave(pid);
+    setManualSaveDirty(false);
+  }
+
+  async function deleteProduct(pid: UUID) {
+    // Only delete the DB record; do not nuke storage by default.
+    await supabase.from('products').delete().eq('id', pid);
+    const next = products.filter((p) => p.id !== pid);
+    setProducts(next);
+    if (selectedProductId === pid) setSelectedProductId(next[0]?.id ?? null);
+  }
+
+  // --- Computed views ---
+  const selectedProduct = useMemo(
+    () => products.find((p) => p.id === selectedProductId) || null,
+    [products, selectedProductId]
+  );
+
+  const fudge = useMemo(() => products.find((p) => p.name.toLowerCase().includes('fudge')), [products]);
+  const rct = useMemo(
+    () => products.find((p) => p.name.toLowerCase().includes('rice') || p.name.toLowerCase().includes('crispy')),
+    [products]
+  );
+
+  const fudgeExpiry = fudge ? computeExpiry(fudge.days_out) : null;
+  const rctExpiry = rct ? computeExpiry(rct.days_out) : null;
+
+  // --- UI ---
   return (
     <div className="space-y-6">
+      {/* Header (unchanged per your request) */}
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-3">
           <Tag className="w-8 h-8 text-gray-500" />
           <h2 className="text-3xl font-bold text-gray-800 font-quicksand">Labels</h2>
         </div>
-        <motion.button
-          onClick={() => setShowForm(!showForm)}
-          className="glass-button px-6 py-3 rounded-lg text-gray-800 font-quicksand font-medium flex items-center gap-2"
-          whileHover={{ scale: 1.05 }}
-          whileTap={{ scale: 0.95 }}
-        >
-          <Plus className="w-5 h-5" />
-          New Label
-        </motion.button>
+
+        <div className="flex items-center gap-3">
+          {/* System Monitor */}
+          <div className={`px-3 py-2 rounded-lg glass-card flex items-center gap-2 ${heartbeatOk ? 'text-emerald-600' : 'text-rose-600'}`}>
+            <ShieldCheck className="w-4 h-4" />
+            <span className="text-sm font-medium">
+              {heartbeatOk === null ? 'Checking…' : heartbeatOk ? 'System Live' : 'Offline'}
+              {heartbeatAt ? (
+                <span className="text-gray-500 ml-2">• {heartbeatAt.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
+              ) : null}
+            </span>
+            <button
+              className="ml-2 p-1 rounded hover:bg-white/10 transition"
+              onClick={() => pingHeartbeat()}
+              title="Refresh"
+            >
+              <RefreshCcw className="w-4 h-4" />
+            </button>
+          </div>
+
+          <motion.button
+            onClick={() => setShowForm(!showForm)}
+            className="glass-button px-6 py-3 rounded-lg text-gray-800 font-quicksand font-medium flex items-center gap-2"
+            whileHover={{ scale: 1.05 }}
+            whileTap={{ scale: 0.95 }}
+          >
+            <Plus className="w-5 h-5" />
+            New Product
+          </motion.button>
+        </div>
       </div>
 
+      {/* Expiration Overview */}
+      <div className="grid md:grid-cols-2 gap-4">
+        <div className="glass-card rounded-2xl p-6">
+          <h3 className="font-quicksand text-lg font-bold text-gray-800 mb-2">Upcoming Expirations</h3>
+          <div className="grid sm:grid-cols-2 gap-3">
+            <div className="rounded-xl p-4 bg-white/40 backdrop-blur border border-white/30">
+              <div className="flex items-center gap-2 mb-1">
+                <div className="w-2 h-2 rounded-full bg-indigo-500" />
+                <span className="text-sm text-gray-600">Fudge</span>
+              </div>
+              <div className="text-2xl font-semibold text-gray-800">{formatDate(fudgeExpiry)}</div>
+              <div className="text-xs text-gray-500 mt-1">({fudge?.days_out ?? 60} days out • rounds to 1st/5th)</div>
+            </div>
+            <div className="rounded-xl p-4 bg-white/40 backdrop-blur border border-white/30">
+              <div className="flex items-center gap-2 mb-1">
+                <div className="w-2 h-2 rounded-full bg-emerald-500" />
+                <span className="text-sm text-gray-600">Rice Crispy Treats</span>
+              </div>
+              <div className="text-2xl font-semibold text-gray-800">{formatDate(rctExpiry)}</div>
+              <div className="text-xs text-gray-500 mt-1">({rct?.days_out ?? 75} days out • rounds to 1st/5th)</div>
+            </div>
+          </div>
+          <p className="text-xs text-gray-500 mt-3">
+            Rule: add days, then snap forward to the 1st or 5th (whichever is the next anchor date).
+          </p>
+        </div>
+
+        {/* Live PDF Preview */}
+        <div className="glass-card rounded-2xl p-6">
+          <h3 className="font-quicksand text-lg font-bold text-gray-800 mb-2">Label Preview</h3>
+          {!pdfPreview ? (
+            <div className="h-56 rounded-xl bg-white/30 border border-white/40 flex items-center justify-center text-gray-500">
+              Select a PDF to preview
+            </div>
+          ) : (
+            <div className="h-56 rounded-xl overflow-hidden border border-white/40">
+              <iframe
+                title={pdfPreview.name}
+                src={pdfPreview.signedUrl}
+                className="w-full h-full bg-white"
+              />
+            </div>
+          )}
+          {pdfPreview && (
+            <div className="flex items-center gap-2 mt-3">
+              <button
+                className="px-3 py-2 rounded-lg hover:bg-white/10 transition flex items-center gap-2"
+                onClick={() => openFile(pdfPreview)}
+              >
+                <Eye className="w-4 h-4" />
+                Open
+              </button>
+              <button
+                className="px-3 py-2 rounded-lg hover:bg-white/10 transition flex items-center gap-2"
+                onClick={() => printFile(pdfPreview)}
+              >
+                <Printer className="w-4 h-4" />
+                Print
+              </button>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* New Product form */}
       <AnimatePresence>
         {showForm && (
           <motion.div
-            initial={{ opacity: 0, y: -20 }}
+            initial={{ opacity: 0, y: -12 }}
             animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, y: -20 }}
+            exit={{ opacity: 0, y: -12 }}
             className="glass-card rounded-2xl p-6"
           >
-            <form onSubmit={handleSubmit} className="space-y-4">
-              <div>
-                <label className="block text-sm font-medium text-gray-600 mb-2">Label Name</label>
+            <h3 className="font-quicksand text-lg font-bold text-gray-800 mb-4">Add Product</h3>
+            <div className="grid sm:grid-cols-3 gap-4">
+              <div className="sm:col-span-2">
+                <label className="block text-sm font-medium text-gray-600 mb-2">Name</label>
                 <input
                   type="text"
-                  value={formData.name}
-                  onChange={(e) => setFormData({ ...formData, name: e.target.value })}
+                  value={productForm.name}
+                  onChange={(e) => setProductForm((s) => ({ ...s, name: e.target.value }))}
                   className="w-full glass-input rounded-lg px-4 py-3 text-gray-800 placeholder-blue-300 focus:outline-none"
-                  placeholder="Label name"
-                  required
+                  placeholder="e.g., Caramallow Bars"
                 />
               </div>
               <div>
-                <label className="block text-sm font-medium text-gray-600 mb-2">Color</label>
-                <div className="grid grid-cols-10 gap-2">
-                  {colorOptions.map((color) => (
-                    <button
-                      key={color}
-                      type="button"
-                      onClick={() => setFormData({ ...formData, color })}
-                      className={`w-10 h-10 rounded-lg transition-all ${
-                        formData.color === color ? 'ring-2 ring-white scale-110' : 'hover:scale-105'
-                      }`}
-                      style={{ backgroundColor: color }}
-                    />
-                  ))}
-                </div>
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-gray-600 mb-2">Description</label>
-                <textarea
-                  value={formData.description}
-                  onChange={(e) => setFormData({ ...formData, description: e.target.value })}
-                  className="w-full glass-input rounded-lg px-4 py-3 text-gray-800 placeholder-blue-300 focus:outline-none h-24"
-                  placeholder="Label description..."
+                <label className="block text-sm font-medium text-gray-600 mb-2">Days Out</label>
+                <input
+                  type="number"
+                  min={1}
+                  value={productForm.days_out}
+                  onChange={(e) => setProductForm((s) => ({ ...s, days_out: Number(e.target.value || 1) }))}
+                  className="w-full glass-input rounded-lg px-4 py-3 text-gray-800 placeholder-blue-300 focus:outline-none"
                 />
               </div>
-              <div className="flex gap-3">
-                <motion.button
-                  type="submit"
-                  className="glass-button px-6 py-3 rounded-lg text-gray-800 font-quicksand font-medium"
-                  whileHover={{ scale: 1.05 }}
-                  whileTap={{ scale: 0.95 }}
-                >
-                  Create Label
-                </motion.button>
-                <motion.button
-                  type="button"
-                  onClick={() => setShowForm(false)}
-                  className="px-6 py-3 rounded-lg text-gray-600 hover:bg-white/5 transition-all"
-                  whileHover={{ scale: 1.05 }}
-                  whileTap={{ scale: 0.95 }}
-                >
-                  Cancel
-                </motion.button>
-              </div>
-            </form>
+            </div>
+            <div className="flex gap-3 mt-4">
+              <motion.button
+                onClick={createProduct}
+                className="glass-button px-6 py-3 rounded-lg text-gray-800 font-quicksand font-medium flex items-center gap-2"
+                whileHover={{ scale: 1.05 }}
+                whileTap={{ scale: 0.95 }}
+              >
+                <Plus className="w-5 h-5" />
+                Create Product
+              </motion.button>
+              <motion.button
+                type="button"
+                onClick={() => setShowForm(false)}
+                className="px-6 py-3 rounded-lg text-gray-600 hover:bg-white/5 transition-all"
+                whileHover={{ scale: 1.05 }}
+                whileTap={{ scale: 0.95 }}
+              >
+                Cancel
+              </motion.button>
+            </div>
           </motion.div>
         )}
       </AnimatePresence>
 
-      <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
-        {loading ? (
-          <p className="text-gray-600">Loading labels...</p>
-        ) : labels.length === 0 ? (
-          <p className="text-gray-500">No labels yet. Create your first label!</p>
-        ) : (
-          labels.map((label) => (
-            <motion.div
-              key={label.id}
-              initial={{ opacity: 0, scale: 0.9 }}
-              animate={{ opacity: 1, scale: 1 }}
-              className="glass-card rounded-xl p-5 hover:shadow-2xl transition-all duration-300"
-            >
-              <div className="flex justify-between items-start mb-3">
+      {/* Main Drive-like area */}
+      <div className="grid lg:grid-cols-[280px_1fr_400px] gap-4">
+        {/* Sidebar: Products & Folders */}
+        <div className="glass-card rounded-2xl p-4">
+          <h4 className="font-quicksand font-bold text-gray-800 mb-3">Products</h4>
+          <div className="space-y-1">
+            {products.map((p) => {
+              const pending = editBuffer[p.id];
+              const name = pending?.name ?? p.name;
+              const days = pending?.days_out ?? p.days_out;
+
+              return (
                 <div
-                  className="w-12 h-12 rounded-lg flex items-center justify-center"
-                  style={{ backgroundColor: `${label.color}40` }}
+                  key={p.id}
+                  className={`rounded-xl p-3 transition ${selectedProductId === p.id ? 'bg-white/50' : 'hover:bg-white/30'}`}
                 >
-                  <Tag className="w-6 h-6" style={{ color: label.color }} />
+                  <div className="flex items-center justify-between gap-2">
+                    <button
+                      className="flex items-center gap-2 text-left w-full"
+                      onClick={() => setSelectedProductId(p.id)}
+                      title={p.folder_path}
+                    >
+                      <Folder className="w-4 h-4 text-indigo-500" />
+                      <span className="font-medium text-gray-800 truncate">{name}</span>
+                    </button>
+                    <button
+                      className="p-2 rounded hover:bg-white/40"
+                      onClick={() => deleteProduct(p.id)}
+                      title="Delete product (keeps storage files)"
+                    >
+                      <Trash2 className="w-4 h-4 text-rose-500" />
+                    </button>
+                  </div>
+
+                  {/* Editable settings */}
+                  {selectedProductId === p.id && (
+                    <div className="mt-3 space-y-2">
+                      <div>
+                        <label className="block text-xs text-gray-500 mb-1">Display Name</label>
+                        <input
+                          value={name}
+                          onChange={(e) => bufferValue(p.id, 'name', e.target.value)}
+                          className="w-full glass-input rounded-lg px-3 py-2 text-sm"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-xs text-gray-500 mb-1">Days Out</label>
+                        <input
+                          type="number"
+                          min={1}
+                          value={days}
+                          onChange={(e) => bufferValue(p.id, 'days_out', e.target.value)}
+                          className="w-full glass-input rounded-lg px-3 py-2 text-sm"
+                        />
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <button
+                          className="px-3 py-2 rounded-lg hover:bg-white/10 transition flex items-center gap-2"
+                          onClick={() => manualSave(p.id)}
+                          disabled={!manualSaveDirty && !autoSaving}
+                          title="Save settings"
+                        >
+                          <Save className="w-4 h-4" />
+                          {autoSaving ? 'Saving…' : 'Save'}
+                        </button>
+                        <span className="text-xs text-gray-500">{p.folder_path}</span>
+                      </div>
+                    </div>
+                  )}
                 </div>
-                <button
-                  onClick={() => handleDelete(label.id)}
-                  className="p-2 hover:bg-red-500/20 rounded-lg transition-all"
-                >
-                  <Trash2 className="w-4 h-4 text-red-300" />
-                </button>
+              );
+            })}
+          </div>
+
+          {/* Archive access hint */}
+          <div className="mt-4 p-3 rounded-xl bg-white/30 border border-white/40 text-xs text-gray-600 flex items-start gap-2">
+            <FolderArchive className="w-4 h-4 mt-0.5" />
+            Archive folders are visible only to admins.
+          </div>
+        </div>
+
+        {/* Files area */}
+        <div className="glass-card rounded-2xl p-4">
+          <div className="flex items-center justify-between mb-3">
+            <h4 className="font-quicksand font-bold text-gray-800">
+              {selectedProduct ? `${selectedProduct.name} Files` : 'Select a product'}
+            </h4>
+
+            <div className="flex items-center gap-2">
+              <input
+                ref={uploaderRef}
+                type="file"
+                className="hidden"
+                multiple
+                onChange={(e) => handleUpload(e.target.files)}
+                accept="application/pdf,image/*"
+              />
+              <button
+                onClick={() => uploaderRef.current?.click()}
+                className="glass-button px-4 py-2 rounded-lg text-gray-800 font-quicksand font-medium flex items-center gap-2"
+              >
+                <UploadCloud className="w-4 h-4" />
+                Upload
+              </button>
+            </div>
+          </div>
+
+          <div
+            className="rounded-2xl border border-dashed border-white/50 bg-white/30 p-6 text-gray-500 text-sm flex items-center justify-center mb-4"
+            onDrop={onDrop}
+            onDragOver={onDragOver}
+          >
+            Drag & drop files here to upload
+          </div>
+
+          <div className="grid sm:grid-cols-2 xl:grid-cols-3 gap-3">
+            {selectedProduct ? (
+              files
+                .filter((f) => (f.isArchive ? isAdmin : true)) // hide archive if not admin
+                .map((f) => (
+                  <div key={f.path} className="rounded-xl p-4 bg-white/40 backdrop-blur border border-white/30">
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="flex items-center gap-2">
+                        <FileText className="w-4 h-4 text-gray-600" />
+                        <div>
+                          <div className="font-medium text-gray-800 truncate max-w-[180px]">{f.name}</div>
+                          <div className="text-[11px] text-gray-500">
+                            {f.isArchive ? 'archive/' : ''}{selectedProduct.folder_path}
+                          </div>
+                        </div>
+                      </div>
+                      {f.isArchive ? (
+                        <div className="text-[10px] px-2 py-1 rounded bg-gray-900/10 text-gray-600">ARCHIVE</div>
+                      ) : null}
+                    </div>
+
+                    <div className="flex items-center gap-2 mt-3">
+                      <button className="px-3 py-2 rounded-lg hover:bg-white/10 transition text-sm flex items-center gap-2" onClick={() => openFile(f)}>
+                        <Eye className="w-4 h-4" />
+                        Open
+                      </button>
+                      <button className="px-3 py-2 rounded-lg hover:bg-white/10 transition text-sm flex items-center gap-2" onClick={() => printFile(f)}>
+                        <Printer className="w-4 h-4" />
+                        Print
+                      </button>
+                      {!f.isArchive && (
+                        <button
+                          className="px-3 py-2 rounded-lg hover:bg-white/10 transition text-sm flex items-center gap-2"
+                          onClick={() => moveToArchive(f)}
+                          title="Move to archive"
+                        >
+                          <MoveRight className="w-4 h-4" />
+                          Archive
+                        </button>
+                      )}
+                      {isAdmin && (
+                        <button
+                          className="px-3 py-2 rounded-lg hover:bg-white/10 transition text-sm flex items-center gap-2"
+                          onClick={() => deleteFile(f)}
+                          title="Delete file"
+                        >
+                          <Trash2 className="w-4 h-4 text-rose-600" />
+                          Delete
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                ))
+            ) : (
+              <div className="text-gray-500">Choose a product to view files.</div>
+            )}
+          </div>
+        </div>
+
+        {/* Right panel: Product snapshot & rules */}
+        <div className="glass-card rounded-2xl p-4">
+          <h4 className="font-quicksand font-bold text-gray-800 mb-3">Product Snapshot</h4>
+          {!selectedProduct ? (
+            <div className="text-gray-500 text-sm">Select a product to view details.</div>
+          ) : (
+            <div className="space-y-3">
+              <div className="rounded-xl p-4 bg-white/40 border border-white/30">
+                <div className="text-sm text-gray-600">Product</div>
+                <div className="text-lg font-semibold text-gray-800">{selectedProduct.name}</div>
+                <div className="text-xs text-gray-500 mt-1">Folder: {selectedProduct.folder_path}</div>
               </div>
-              <h3 className="text-lg font-bold text-gray-800 font-quicksand mb-2">{label.name}</h3>
-              {label.description && (
-                <p className="text-sm text-gray-500 line-clamp-2">{label.description}</p>
-              )}
-            </motion.div>
-          ))
-        )}
+              <div className="rounded-xl p-4 bg-white/40 border border-white/30">
+                <div className="text-sm text-gray-600">Days Out</div>
+                <div className="text-2xl font-semibold text-gray-800">{selectedProduct.days_out}</div>
+                <div className="text-xs text-gray-500 mt-1">
+                  Next Expiration Date: {formatDate(computeExpiry(selectedProduct.days_out))}
+                </div>
+              </div>
+              <div className="rounded-xl p-4 bg-white/40 border border-white/30">
+                <div className="text-sm text-gray-600">Expiration Rounding</div>
+                <div className="text-xs text-gray-700">
+                  Add days, then snap to the next available anchor date: 1st or 5th. If after the 5th,
+                  roll to the 1st of next month.
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Footer note */}
+      <div className="text-xs text-gray-500">
+        Changes auto-save after 1s of inactivity {autoSaving ? '• Saving…' : manualSaveDirty ? '• Unsaved edits' : ''}.
       </div>
     </div>
   );
