@@ -140,10 +140,20 @@ export default function LabelsTab() {
   // simple debounce map for auto-save
   const debounceTimers = useRef<Record<UUID, any>>({});
 
-  // Notification helper
+  // Notification helper with deduplication
   const addNotification = (type: 'success' | 'error' | 'info', message: string, duration = 5000) => {
-    const id = `${Date.now()}-${Math.random()}`;
-    setNotifications((prev) => [...prev, { id, type, message, duration }]);
+    setNotifications((prev) => {
+      // Check if a notification with the same message already exists
+      const exists = prev.some(n => n.message === message && n.type === type);
+      if (exists) {
+        console.log('[Labels] Skipping duplicate notification:', message);
+        return prev;
+      }
+
+      const id = `${Date.now()}-${Math.random()}`;
+      console.log('[Labels] Adding notification:', type, message);
+      return [...prev, { id, type, message, duration }];
+    });
   };
 
   const removeNotification = (id: string) => {
@@ -1189,8 +1199,8 @@ export default function LabelsTab() {
       </AnimatePresence>
 
       {/* Notification System - Bottom Right */}
-      <div className="fixed bottom-4 right-4 z-50 flex flex-col gap-2 max-w-md pointer-events-none">
-        <AnimatePresence mode="popLayout">
+      <div className="fixed bottom-4 right-4 z-50 flex flex-col gap-3 max-w-md w-96 pointer-events-none">
+        <AnimatePresence initial={false}>
           {notifications.map((notification) => (
             <NotificationToast
               key={notification.id}
@@ -1238,11 +1248,14 @@ function NotificationToast({ notification, onRemove }: { notification: Notificat
 
   return (
     <motion.div
-      initial={{ opacity: 0, x: 400 }}
-      animate={{ opacity: 1, x: 0 }}
-      exit={{ opacity: 0, x: 400 }}
-      transition={{ type: 'spring', stiffness: 300, damping: 30 }}
-      layout
+      initial={{ x: 400, opacity: 0 }}
+      animate={{ x: 0, opacity: 1 }}
+      exit={{ x: 400, opacity: 0 }}
+      transition={{
+        type: 'tween',
+        duration: 0.3,
+        ease: 'easeOut'
+      }}
       className={`relative rounded-lg border shadow-lg overflow-hidden pointer-events-auto ${colors[notification.type]}`}
     >
       <div className="p-4 pr-10">
