@@ -84,7 +84,7 @@ export function ToastDock() {
 
   return (
     <div
-      className="fixed top-20 right-8 z-[9999] flex flex-col gap-3 pointer-events-none"
+      className="fixed bottom-24 right-8 z-[9999] flex flex-col-reverse gap-3 pointer-events-none"
     >
       {toasts.map((toast) => {
         const progress = (toast.timeLeft / TOAST_DURATION) * 100;
