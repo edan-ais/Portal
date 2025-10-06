@@ -1193,8 +1193,8 @@ export default function LabelsTab() {
         )}
       </AnimatePresence>
 
-      {/* Notification System - Bottom Right */}
-      <div className="fixed bottom-4 right-4 z-50 flex flex-col gap-3 max-w-md w-96 pointer-events-none">
+      {/* Notification System - Top Right */}
+      <div className="fixed top-24 right-4 z-50 flex flex-col gap-3 max-w-md w-96 pointer-events-none">
         <AnimatePresence initial={false}>
           {notifications.map((notification) => (
             <NotificationToast
