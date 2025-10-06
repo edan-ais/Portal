@@ -248,22 +248,23 @@ export default function LabelsTab() {
     } catch (_) {}
   }
   async function loadFiles(product: Product) {
-    const root = await supabase.storage.from(LABELS_BUCKET).list(product.folder_path, { limit: 1000 });
-    const arch = await supabase.storage.from(LABELS_BUCKET).list(`${product.folder_path}${ARCHIVE_DIR}`, { limit: 1000 });
+    const { data: dbFiles } = await supabase
+      .from('files')
+      .select('*')
+      .eq('folder_id', product.id)
+      .eq('is_trashed', false)
+      .order('created_at', { ascending: false });
 
-    const toItems = (entries: any[], isArchive = false): FileItem[] =>
-      (entries || [])
-        .filter((e) => e && !e.name.endsWith('.keep'))
-        .map((e) => ({
-          name: e.name,
-          path: `${isArchive ? product.folder_path + ARCHIVE_DIR + '/' : product.folder_path}${e.name}`,
-          created_at: e.created_at,
-          size: e.metadata?.size,
-          mimeType: e.metadata?.mimetype,
-          isArchive
-        }));
+    const fileItems: FileItem[] = (dbFiles || []).map((f) => ({
+      name: f.name,
+      path: f.file_path,
+      created_at: f.created_at,
+      size: f.file_size,
+      mimeType: f.mime_type,
+      isArchive: f.file_path.includes(`/${ARCHIVE_DIR}/`)
+    }));
 
-    setFiles([...(toItems(root.data || [], false)), ...(toItems(arch.data || [], true))]);
+    setFiles(fileItems);
   }
   async function signUrl(path: string) {
     const { data, error } = await supabase.storage.from(LABELS_BUCKET).createSignedUrl(path, 60 * 10);
@@ -289,6 +290,12 @@ export default function LabelsTab() {
     if (!p) return;
     const dest = `${p.folder_path}${ARCHIVE_DIR}/${file.name}`;
     await supabase.storage.from(LABELS_BUCKET).move(file.path, dest);
+
+    await supabase
+      .from('files')
+      .update({ file_path: dest })
+      .eq('file_path', file.path);
+
     await loadFiles(p);
   }
 
@@ -299,6 +306,12 @@ export default function LabelsTab() {
     const stamp = Date.now();
     const trashPath = `${TRASH_PREFIX}${file.path}.${stamp}`;
     await supabase.storage.from(LABELS_BUCKET).move(file.path, trashPath);
+
+    await supabase
+      .from('files')
+      .update({ is_trashed: true, trashed_at: new Date().toISOString() })
+      .eq('file_path', file.path);
+
     await supabase.from('deleted_items').insert({
       kind: 'file',
       product_id: p.id,
@@ -325,14 +338,31 @@ export default function LabelsTab() {
       const { error: uploadError } = await supabase.storage.from(LABELS_BUCKET).upload(dest, f, { upsert: true, contentType: f.type });
 
       if (!uploadError) {
-        await supabase.from('files').insert({
-          folder_id: selectedProductId,
-          name: f.name,
-          file_path: dest,
-          file_size: f.size,
-          mime_type: f.type || 'application/octet-stream',
-          created_by: userId,
-        });
+        const { data: existingFile } = await supabase
+          .from('files')
+          .select('id')
+          .eq('file_path', dest)
+          .maybeSingle();
+
+        if (existingFile) {
+          await supabase
+            .from('files')
+            .update({
+              file_size: f.size,
+              mime_type: f.type || 'application/octet-stream',
+              updated_at: new Date().toISOString(),
+            })
+            .eq('id', existingFile.id);
+        } else {
+          await supabase.from('files').insert({
+            folder_id: selectedProductId,
+            name: f.name,
+            file_path: dest,
+            file_size: f.size,
+            mime_type: f.type || 'application/octet-stream',
+            created_by: userId,
+          });
+        }
       }
     }
     await loadFiles(p);
@@ -440,6 +470,11 @@ export default function LabelsTab() {
       if (!item.original_path || !item.trash_path) return;
       try {
         await supabase.storage.from(LABELS_BUCKET).move(item.trash_path, item.original_path);
+
+        await supabase
+          .from('files')
+          .update({ is_trashed: false, trashed_at: null })
+          .eq('file_path', item.original_path);
       } catch (_) {}
       await supabase.from('deleted_items').delete().eq('id', item.id);
     } else {
