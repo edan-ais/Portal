@@ -3,6 +3,7 @@ import { AnimatePresence, motion } from 'framer-motion';
 import TopBar from './components/TopBar';
 import BottomBar from './components/BottomBar';
 import Sidebar, { TabItem, tabIconMap } from './components/Sidebar';
+import NotificationPanel from './components/NotificationPanel';
 import HomeTab from './tabs/Home/HomeTab';
 import TasksTab from './tabs/Tasks/TasksTab';
 import EventsTab from './tabs/Events/EventsTab';
@@ -29,6 +30,7 @@ const defaultTabs: TabItem[] = [
 function App() {
   const [activeTab, setActiveTab] = useState('home');
   const [tabs, setTabs] = useState<TabItem[]>(defaultTabs);
+  const [showNotifications, setShowNotifications] = useState(false);
   const [unreadCount, setUnreadCount] = useState(0);
 
   useEffect(() => {
@@ -47,6 +49,11 @@ function App() {
 
   const handleTabOrderChange = (newOrder: TabItem[]) => {
     setTabs(newOrder);
+  };
+
+  const handleNotificationNavigate = (tab: string) => {
+    setActiveTab(tab);
+    setShowNotifications(false);
   };
 
   const renderTab = () => {
@@ -68,7 +75,7 @@ function App() {
   return (
     <div className="h-screen bg-gray-50 overflow-hidden">
       <TopBar
-        onNotificationClick={() => {}}
+        onNotificationClick={() => setShowNotifications(!showNotifications)}
         onLogoClick={() => setActiveTab('home')}
         unreadCount={unreadCount}
       />
@@ -77,6 +84,11 @@ function App() {
         onTabChange={setActiveTab}
         tabs={tabs}
         onTabOrderChange={handleTabOrderChange}
+      />
+      <NotificationPanel
+        isOpen={showNotifications}
+        onClose={() => setShowNotifications(false)}
+        onNavigate={handleNotificationNavigate}
       />
       <main className="fixed left-64 right-0 top-16 bottom-12 overflow-hidden flex flex-col">
         <div className="flex-1 overflow-y-auto p-8">

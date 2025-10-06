@@ -188,6 +188,7 @@ export default function LabelsTab() {
         const labelsBucket = buckets?.find(b => b.name === LABELS_BUCKET);
         if (!labelsBucket) {
           console.warn('[Labels] Labels bucket not found! Storage uploads will fail.');
+          addNotification('error', 'Storage bucket not configured. Please contact administrator.', 10000);
         } else {
           console.log('[Labels] Labels bucket found:', labelsBucket);
         }
