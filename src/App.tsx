@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
 import TopBar from './components/TopBar';
 import BottomBar from './components/BottomBar';
@@ -12,7 +12,6 @@ import LabelsTab from './tabs/Labels/LabelsTab';
 import DonationsTab from './tabs/Donations/DonationsTab';
 import StoreTab from './tabs/Store/StoreTab';
 import AccountingTab from './tabs/Accounting/AccountingTab';
-import { supabase } from './lib/supabase';
 
 const defaultTabs: TabItem[] = [
   { id: 'home', label: 'Home', icon: tabIconMap.home },
@@ -29,21 +28,6 @@ const defaultTabs: TabItem[] = [
 function App() {
   const [activeTab, setActiveTab] = useState('home');
   const [tabs, setTabs] = useState<TabItem[]>(defaultTabs);
-  const [unreadCount, setUnreadCount] = useState(0);
-
-  useEffect(() => {
-    fetchUnreadCount();
-    const interval = setInterval(fetchUnreadCount, 30000);
-    return () => clearInterval(interval);
-  }, []);
-
-  const fetchUnreadCount = async () => {
-    const { count } = await supabase
-      .from('notifications')
-      .select('*', { count: 'exact', head: true })
-      .eq('is_read', false);
-    setUnreadCount(count || 0);
-  };
 
   const handleTabOrderChange = (newOrder: TabItem[]) => {
     setTabs(newOrder);
@@ -68,9 +52,7 @@ function App() {
   return (
     <div className="h-screen bg-gray-50 overflow-hidden">
       <TopBar
-        onNotificationClick={() => {}}
         onLogoClick={() => setActiveTab('home')}
-        unreadCount={unreadCount}
       />
       <Sidebar
         activeTab={activeTab}

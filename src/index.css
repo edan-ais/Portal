@@ -43,8 +43,3 @@
   box-shadow: 0 4px 16px rgba(59, 130, 246, 0.4);
   transform: translateY(-2px);
 }
-
-.notification-overlay {
-  backdrop-filter: blur(8px);
-  background: rgba(0, 0, 0, 0.3);
-}
