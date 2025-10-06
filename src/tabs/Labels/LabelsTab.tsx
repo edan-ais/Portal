@@ -63,6 +63,13 @@ interface UpdaterStatus {
   cooldown_seconds: number;       // e.g. 86400
 }
 
+interface Notification {
+  id: string;
+  type: 'success' | 'error' | 'info';
+  message: string;
+  duration?: number;
+}
+
 const LABELS_BUCKET = 'labels';
 const ARCHIVE_DIR = 'archive';
 const TRASH_PREFIX = '_trash/';
@@ -119,6 +126,9 @@ export default function LabelsTab() {
   const [uploading, setUploading] = useState(false);
   const [showDebug, setShowDebug] = useState(false);
 
+  // Notification system
+  const [notifications, setNotifications] = useState<Notification[]>([]);
+
   // Preview modal
   const [previewOpen, setPreviewOpen] = useState(false);
   const [previewFile, setPreviewFile] = useState<FileItem | null>(null);
@@ -129,6 +139,26 @@ export default function LabelsTab() {
 
   // simple debounce map for auto-save
   const debounceTimers = useRef<Record<UUID, any>>({});
+
+  // Notification helper with deduplication
+  const addNotification = (type: 'success' | 'error' | 'info', message: string, duration = 5000) => {
+    setNotifications((prev) => {
+      // Check if a notification with the same message already exists
+      const exists = prev.some(n => n.message === message && n.type === type);
+      if (exists) {
+        console.log('[Labels] Skipping duplicate notification:', message);
+        return prev;
+      }
+
+      const id = `${Date.now()}-${Math.random()}`;
+      console.log('[Labels] Adding notification:', type, message);
+      return [...prev, { id, type, message, duration }];
+    });
+  };
+
+  const removeNotification = (id: string) => {
+    setNotifications((prev) => prev.filter((n) => n.id !== id));
+  };
 
   // ------ Bootstrap ------
   useEffect(() => {
@@ -158,6 +188,7 @@ export default function LabelsTab() {
         const labelsBucket = buckets?.find(b => b.name === LABELS_BUCKET);
         if (!labelsBucket) {
           console.warn('[Labels] Labels bucket not found! Storage uploads will fail.');
+          addNotification('error', 'Storage bucket not configured. Please contact administrator.', 10000);
         } else {
           console.log('[Labels] Labels bucket found:', labelsBucket);
         }
@@ -459,6 +490,15 @@ export default function LabelsTab() {
 
       console.log(`[Labels] Upload complete: ${successCount} success, ${errorCount} errors`);
 
+      // Only show summary notifications, not individual file errors (those are shown per-file above)
+      if (successCount > 0 && errorCount === 0) {
+        addNotification('success', `${successCount} file(s) uploaded successfully`);
+      } else if (successCount > 0 && errorCount > 0) {
+        addNotification('info', `${successCount} uploaded, ${errorCount} failed`);
+      } else if (errorCount > 0 && successCount === 0) {
+        addNotification('error', 'All files failed to upload. Check console for details.');
+      }
+
       if (uploaderRef.current) {
         uploaderRef.current.value = '';
       }
@@ -466,6 +506,7 @@ export default function LabelsTab() {
       await loadFiles(p);
     } catch (e) {
       console.error('[Labels] Unexpected error during upload:', e);
+      addNotification('error', 'An unexpected error occurred during upload');
     } finally {
       setUploading(false);
     }
@@ -1156,6 +1197,83 @@ export default function LabelsTab() {
           </motion.div>
         )}
       </AnimatePresence>
+
+      {/* Notification System - Bottom Right */}
+      <div className="fixed bottom-4 right-4 z-50 flex flex-col gap-3 max-w-md w-96 pointer-events-none">
+        <AnimatePresence initial={false}>
+          {notifications.map((notification) => (
+            <NotificationToast
+              key={notification.id}
+              notification={notification}
+              onRemove={removeNotification}
+            />
+          ))}
+        </AnimatePresence>
+      </div>
     </div>
+  );
+}
+
+function NotificationToast({ notification, onRemove }: { notification: Notification; onRemove: (id: string) => void }) {
+  const [progress, setProgress] = useState(100);
+  const duration = notification.duration || 5000;
+
+  useEffect(() => {
+    const startTime = Date.now();
+    const interval = setInterval(() => {
+      const elapsed = Date.now() - startTime;
+      const remaining = Math.max(0, 100 - (elapsed / duration) * 100);
+      setProgress(remaining);
+
+      if (remaining === 0) {
+        clearInterval(interval);
+        onRemove(notification.id);
+      }
+    }, 50);
+
+    return () => clearInterval(interval);
+  }, [notification.id, duration, onRemove]);
+
+  const colors = {
+    success: 'bg-green-50 border-green-200 text-green-800',
+    error: 'bg-red-50 border-red-200 text-red-800',
+    info: 'bg-blue-50 border-blue-200 text-blue-800',
+  };
+
+  const progressColors = {
+    success: 'bg-green-500',
+    error: 'bg-red-500',
+    info: 'bg-blue-500',
+  };
+
+  return (
+    <motion.div
+      initial={{ x: 400, opacity: 0 }}
+      animate={{ x: 0, opacity: 1 }}
+      exit={{ x: 400, opacity: 0 }}
+      transition={{
+        type: 'tween',
+        duration: 0.3,
+        ease: 'easeOut'
+      }}
+      className={`relative rounded-lg border shadow-lg overflow-hidden pointer-events-auto ${colors[notification.type]}`}
+    >
+      <div className="p-4 pr-10">
+        <div className="font-medium">{notification.message}</div>
+      </div>
+      <button
+        onClick={() => onRemove(notification.id)}
+        className="absolute top-2 right-2 p-1 rounded hover:bg-black/10 transition pointer-events-auto"
+      >
+        <X className="w-4 h-4" />
+      </button>
+      <div className="h-1 bg-black/10">
+        <motion.div
+          className={`h-full ${progressColors[notification.type]}`}
+          style={{ width: `${progress}%` }}
+          transition={{ duration: 0.05, ease: 'linear' }}
+        />
+      </div>
+    </motion.div>
   );
 }
