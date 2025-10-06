@@ -94,10 +94,8 @@ export default function NotificationPanel({ isOpen, onClose, onNavigate }: Notif
               ) : (
                 <div className="divide-y divide-blue-50">
                   {notifications.map((notification) => (
-                    <motion.div
+                    <div
                       key={notification.id}
-                      initial={{ opacity: 0, x: -20 }}
-                      animate={{ opacity: 1, x: 0 }}
                       className={`p-4 hover:bg-blue-50 transition-all cursor-pointer relative ${
                         !notification.is_read ? 'bg-blue-25' : ''
                       }`}
@@ -148,7 +146,7 @@ export default function NotificationPanel({ isOpen, onClose, onNavigate }: Notif
                           </button>
                         </div>
                       </div>
-                    </motion.div>
+                    </div>
                   ))}
                 </div>
               )}
