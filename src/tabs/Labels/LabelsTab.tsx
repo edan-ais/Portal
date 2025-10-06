@@ -281,6 +281,7 @@ export default function LabelsTab() {
     } catch (e) {
       console.error(e);
       setUpdaterStatus('error');
+      addNotification('error', 'Failed to run label updater. Please check configuration.');
     }
   };
 
@@ -872,11 +873,6 @@ export default function LabelsTab() {
         {updaterStatus === 'done' && (
           <motion.div initial={{ opacity: 0, y: -8 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -8 }} className="p-3 bg-green-50 rounded-xl text-green-700">
             Done
-          </motion.div>
-        )}
-        {updaterStatus === 'error' && (
-          <motion.div initial={{ opacity: 0, y: -8 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -8 }} className="p-3 bg-red-50 rounded-xl text-red-700">
-            Error
           </motion.div>
         )}
       </AnimatePresence>
