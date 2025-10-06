@@ -105,10 +105,11 @@ function App() {
       </main>
       <BottomBar />
       <NotificationPanel
-        isOpen={showNotifications}
-        onClose={() => setShowNotifications(false)}
-        onNavigate={handleNotificationNavigate}
-      />
+  isOpen={showNotifications}
+  onClose={() => setShowNotifications(false)}
+  onNavigate={handleNotificationNavigate}
+  duration={4000}
+/>
     </div>
   );
 }
