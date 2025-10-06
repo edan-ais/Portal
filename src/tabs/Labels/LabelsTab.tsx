@@ -866,12 +866,22 @@ export default function LabelsTab() {
       {/* Updater feedback (minimal) */}
       <AnimatePresence>
         {updaterStatus === 'running' && (
-          <motion.div initial={{ opacity: 0, y: -8 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -8 }} className="p-3 bg-yellow-50 rounded-xl text-yellow-700">
+          <motion.div
+            initial={{ opacity: 0, y: -8 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -8 }}
+            className="absolute top-20 left-1/2 -translate-x-1/2 z-40 p-3 bg-yellow-50 rounded-xl text-yellow-700 shadow-lg"
+          >
             Updating…
           </motion.div>
         )}
         {updaterStatus === 'done' && (
-          <motion.div initial={{ opacity: 0, y: -8 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -8 }} className="p-3 bg-green-50 rounded-xl text-green-700">
+          <motion.div
+            initial={{ opacity: 0, y: -8 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -8 }}
+            className="absolute top-20 left-1/2 -translate-x-1/2 z-40 p-3 bg-green-50 rounded-xl text-green-700 shadow-lg"
+          >
             Done
           </motion.div>
         )}
@@ -1194,7 +1204,7 @@ export default function LabelsTab() {
       </AnimatePresence>
 
       {/* Notification System - Top Right */}
-      <div className="fixed top-24 right-4 z-50 flex flex-col gap-3 max-w-md w-96 pointer-events-none">
+      <div className="fixed top-32 right-4 z-50 flex flex-col gap-3 max-w-md w-96 pointer-events-none">
         <AnimatePresence initial={false}>
           {notifications.map((notification) => (
             <NotificationToast
