@@ -317,9 +317,23 @@ export default function LabelsTab() {
     const p = products.find((x) => x.id === selectedProductId);
     if (!p) return;
 
+    const { data: sessionRes } = await supabase.auth.getSession();
+    const userId = sessionRes?.session?.user?.id || null;
+
     for (const f of Array.from(filesToUpload)) {
       const dest = `${p.folder_path}${f.name}`;
-      await supabase.storage.from(LABELS_BUCKET).upload(dest, f, { upsert: true, contentType: f.type });
+      const { error: uploadError } = await supabase.storage.from(LABELS_BUCKET).upload(dest, f, { upsert: true, contentType: f.type });
+
+      if (!uploadError) {
+        await supabase.from('files').insert({
+          folder_id: selectedProductId,
+          name: f.name,
+          file_path: dest,
+          file_size: f.size,
+          mime_type: f.type || 'application/octet-stream',
+          created_by: userId,
+        });
+      }
     }
     await loadFiles(p);
   }
