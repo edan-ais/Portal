@@ -3,7 +3,6 @@ import { AnimatePresence, motion } from 'framer-motion';
 import TopBar from './components/TopBar';
 import BottomBar from './components/BottomBar';
 import Sidebar, { TabItem, tabIconMap } from './components/Sidebar';
-import NotificationPanel from './components/NotificationPanel';
 import HomeTab from './tabs/Home/HomeTab';
 import TasksTab from './tabs/Tasks/TasksTab';
 import EventsTab from './tabs/Events/EventsTab';
@@ -30,7 +29,6 @@ const defaultTabs: TabItem[] = [
 function App() {
   const [activeTab, setActiveTab] = useState('home');
   const [tabs, setTabs] = useState<TabItem[]>(defaultTabs);
-  const [showNotifications, setShowNotifications] = useState(false);
   const [unreadCount, setUnreadCount] = useState(0);
 
   useEffect(() => {
@@ -49,11 +47,6 @@ function App() {
 
   const handleTabOrderChange = (newOrder: TabItem[]) => {
     setTabs(newOrder);
-  };
-
-  const handleNotificationNavigate = (tab: string) => {
-    setActiveTab(tab);
-    setShowNotifications(false);
   };
 
   const renderTab = () => {
@@ -75,7 +68,7 @@ function App() {
   return (
     <div className="h-screen bg-gray-50 overflow-hidden">
       <TopBar
-        onNotificationClick={() => setShowNotifications(!showNotifications)}
+        onNotificationClick={() => {}}
         onLogoClick={() => setActiveTab('home')}
         unreadCount={unreadCount}
       />
@@ -104,12 +97,6 @@ function App() {
         </div>
       </main>
       <BottomBar />
-      <NotificationPanel
-  isOpen={showNotifications}
-  onClose={() => setShowNotifications(false)}
-  onNavigate={handleNotificationNavigate}
-  duration={4000}
-/>
     </div>
   );
 }
