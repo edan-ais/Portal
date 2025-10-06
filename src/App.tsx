@@ -90,8 +90,8 @@ function App() {
         onClose={() => setShowNotifications(false)}
         onNavigate={handleNotificationNavigate}
       />
-      <main className="fixed left-64 right-0 top-16 bottom-12 overflow-y-auto">
-        <div className="h-full p-8">
+      <main className="fixed left-64 right-0 top-16 bottom-12 overflow-hidden flex flex-col">
+        <div className="flex-1 overflow-y-auto p-8">
           <div className="max-w-7xl mx-auto h-full">
             <AnimatePresence mode="wait">
               <motion.div
