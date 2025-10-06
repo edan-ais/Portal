@@ -1,5 +1,5 @@
 // components/ToastDock.tsx
-import { useState, useEffect, useRef, useLayoutEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { X, Bell } from 'lucide-react';
 import { supabase } from '../lib/supabase';
 
@@ -12,52 +12,43 @@ interface Toast {
   timeLeft: number;
 }
 
-const TOAST_DURATION = 5000; // ms
-const TICK_MS = 100; // ms between countdown ticks
+const TOAST_DURATION = 5000;
+const TICK_MS = 100;
 
 export function ToastDock() {
   const [toasts, setToasts] = useState<Toast[]>([]);
   const pausedToasts = useRef<Set<string>>(new Set());
   const checkIntervalRef = useRef<number | null>(null);
-  const [bottomPad, setBottomPad] = useState<number>(64); // px fallback (approx h-12 + gap)
+  const [bottomOffset, setBottomOffset] = useState<number>(96); // default fallback px
 
-  // --- Position above BottomBar (robust) ---
-  useLayoutEffect(() => {
-    const computeBottomPad = () => {
-      let height = 48; // default BottomBar height (h-12)
-      const el = document.getElementById('bottom-bar');
-      if (el) {
-        const rect = el.getBoundingClientRect();
-        height = rect.height || height;
+  // ---- Measure BottomBar height dynamically ----
+  useEffect(() => {
+    const updateOffset = () => {
+      const bar = document.getElementById('bottom-bar');
+      if (bar) {
+        const height = bar.getBoundingClientRect().height || 0;
+        setBottomOffset(height + 24); // 24px = ~1.5rem gap
       } else {
-        // optional CSS var override: :root { --bottom-bar-height: 56px; }
-        const varVal = getComputedStyle(document.documentElement).getPropertyValue('--bottom-bar-height');
-        const parsed = parseFloat(varVal);
-        if (!Number.isNaN(parsed)) height = parsed;
+        setBottomOffset(96);
       }
-      setBottomPad(height + 16); // add 16px gap
     };
+    updateOffset();
 
-    computeBottomPad();
+    // re-measure on resize & if BottomBar resizes
+    const ro = new ResizeObserver(updateOffset);
+    const bar = document.getElementById('bottom-bar');
+    if (bar) ro.observe(bar);
 
-    const el = document.getElementById('bottom-bar');
-    let ro: ResizeObserver | null = null;
-
-    if (el && 'ResizeObserver' in window) {
-      ro = new ResizeObserver(() => computeBottomPad());
-      ro.observe(el);
-    }
-
-    window.addEventListener('resize', computeBottomPad);
+    window.addEventListener('resize', updateOffset);
     return () => {
-      window.removeEventListener('resize', computeBottomPad);
-      if (ro) ro.disconnect();
+      window.removeEventListener('resize', updateOffset);
+      ro.disconnect();
     };
   }, []);
 
-  // --- Poll for new unread notifications and enqueue as toasts ---
+  // ---- Poll new unread notifications ----
   useEffect(() => {
-    const checkForNewNotifications = async () => {
+    const checkForNew = async () => {
       const { data, error } = await supabase
         .from('notifications')
         .select('*')
@@ -66,12 +57,11 @@ export function ToastDock() {
         .limit(5);
 
       if (error || !data) return;
-
       const existingIds = new Set(toasts.map((t) => t.id));
-      const newNotifications = data.filter((n: any) => !existingIds.has(n.id));
+      const newOnes = data.filter((n) => !existingIds.has(n.id));
 
-      if (newNotifications.length > 0) {
-        const newToasts: Toast[] = newNotifications.map((n: any) => ({
+      if (newOnes.length) {
+        const mapped = newOnes.map((n) => ({
           id: n.id,
           title: n.title ?? 'Notification',
           message: n.message,
@@ -79,68 +69,57 @@ export function ToastDock() {
           created_at: n.created_at,
           timeLeft: TOAST_DURATION,
         }));
-        // newest on top, keep list small
-        setToasts((prev) => [...newToasts, ...prev].slice(0, 4));
+        setToasts((prev) => [...mapped, ...prev].slice(0, 4));
       }
     };
 
-    checkForNewNotifications();
-    checkIntervalRef.current = window.setInterval(checkForNewNotifications, 10000);
-
+    checkForNew();
+    checkIntervalRef.current = window.setInterval(checkForNew, 10000);
     return () => {
       if (checkIntervalRef.current) clearInterval(checkIntervalRef.current);
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [toasts]);
 
-  // --- Countdown & auto-dismiss (pauses per-toast on hover) ---
+  // ---- Countdown loop ----
   useEffect(() => {
     const interval = window.setInterval(() => {
       setToasts((prev) =>
         prev
-          .map((toast) => {
-            if (pausedToasts.current.has(toast.id)) return toast;
-            const next = Math.max(0, toast.timeLeft - TICK_MS);
-            return { ...toast, timeLeft: next };
-          })
-          .filter((toast) => toast.timeLeft > 0)
+          .map((t) =>
+            pausedToasts.current.has(t.id)
+              ? t
+              : { ...t, timeLeft: Math.max(0, t.timeLeft - TICK_MS) }
+          )
+          .filter((t) => t.timeLeft > 0)
       );
     }, TICK_MS);
-
     return () => clearInterval(interval);
   }, []);
 
   const dismissToast = async (id: string) => {
-    setToasts((prev) => prev.filter((t) => t.id !== id));
+    setToasts((p) => p.filter((t) => t.id !== id));
     try {
       await supabase.from('notifications').update({ is_read: true }).eq('id', id);
-    } catch {
-      // ignore
-    }
+    } catch {}
   };
 
-  const handleMouseEnter = (id: string) => {
-    pausedToasts.current.add(id);
-  };
-
-  const handleMouseLeave = (id: string) => {
-    pausedToasts.current.delete(id);
+  const handlePause = (id: string, pause: boolean) => {
+    if (pause) pausedToasts.current.add(id);
+    else pausedToasts.current.delete(id);
   };
 
   return (
     <div
       className="fixed right-8 z-[9999] flex flex-col-reverse gap-3 pointer-events-none"
       style={{
-        bottom: `calc(${bottomPad}px + env(safe-area-inset-bottom))`,
+        bottom: `${bottomOffset}px`,
       }}
     >
       {toasts.map((toast) => {
         const progress = (toast.timeLeft / TOAST_DURATION) * 100;
-
-        // slide-in from right at start; fade near the end
-        const isJustShown = toast.timeLeft === TOAST_DURATION;
-        const translateX = isJustShown ? 400 : 0;
-        const fadeWindow = 200; // ms
+        const isEntering = toast.timeLeft === TOAST_DURATION;
+        const translateX = isEntering ? 400 : 0;
+        const fadeWindow = 200;
         const opacity =
           toast.timeLeft > fadeWindow ? 1 : Math.max(0, toast.timeLeft / fadeWindow);
 
@@ -152,10 +131,8 @@ export function ToastDock() {
               transform: `translateX(${translateX}px)`,
               opacity,
             }}
-            onMouseEnter={() => handleMouseEnter(toast.id)}
-            onMouseLeave={() => handleMouseLeave(toast.id)}
-            role="status"
-            aria-live="polite"
+            onMouseEnter={() => handlePause(toast.id, true)}
+            onMouseLeave={() => handlePause(toast.id, false)}
           >
             <div className="p-4">
               <div className="flex items-start gap-3">
@@ -179,14 +156,12 @@ export function ToastDock() {
                   onClick={() => dismissToast(toast.id)}
                   className="flex-shrink-0 p-1 hover:bg-gray-100 rounded-lg transition-colors"
                   aria-label="Dismiss notification"
-                  title="Dismiss"
                 >
                   <X className="w-4 h-4 text-gray-500" />
                 </button>
               </div>
             </div>
 
-            {/* Progress bar */}
             <div className="h-1 bg-gray-100">
               <div
                 className="h-full bg-blue-500 transition-all duration-100 linear"
