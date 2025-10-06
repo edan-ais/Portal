@@ -418,7 +418,6 @@ export default function LabelsTab() {
 
         if (uploadError) {
           console.error(`[Labels] Storage upload error for ${f.name}:`, uploadError);
-          addNotification('error', `Upload failed for ${f.name}: ${uploadError.message || 'Unknown error'}`, 8000);
           errorCount++;
           continue;
         }
@@ -433,7 +432,6 @@ export default function LabelsTab() {
 
         if (queryError) {
           console.error(`[Labels] Query error for ${f.name}:`, queryError);
-          addNotification('error', `Database query error: ${queryError.message}`, 8000);
           errorCount++;
           continue;
         }
@@ -451,7 +449,6 @@ export default function LabelsTab() {
 
           if (updateError) {
             console.error(`[Labels] Update error for ${f.name}:`, updateError);
-            addNotification('error', `Failed to update file record: ${updateError.message}`, 8000);
             errorCount++;
           } else {
             console.log(`[Labels] Updated file record for ${f.name}`);
@@ -473,7 +470,6 @@ export default function LabelsTab() {
 
           if (insertError) {
             console.error(`[Labels] Insert error for ${f.name}:`, insertError);
-            addNotification('error', `Failed to create file record: ${insertError.message}`, 8000);
             errorCount++;
           } else {
             console.log(`[Labels] Created file record for ${f.name}:`, insertedFile);
@@ -484,12 +480,13 @@ export default function LabelsTab() {
 
       console.log(`[Labels] Upload complete: ${successCount} success, ${errorCount} errors`);
 
-      if (errorCount > 0) {
-        addNotification('error', `${errorCount} file(s) failed to upload`);
-      }
-
-      if (successCount > 0) {
+      // Only show summary notifications, not individual file errors (those are shown per-file above)
+      if (successCount > 0 && errorCount === 0) {
         addNotification('success', `${successCount} file(s) uploaded successfully`);
+      } else if (successCount > 0 && errorCount > 0) {
+        addNotification('info', `${successCount} uploaded, ${errorCount} failed`);
+      } else if (errorCount > 0 && successCount === 0) {
+        addNotification('error', 'All files failed to upload. Check console for details.');
       }
 
       if (uploaderRef.current) {
@@ -1192,8 +1189,8 @@ export default function LabelsTab() {
       </AnimatePresence>
 
       {/* Notification System - Bottom Right */}
-      <div className="fixed bottom-4 right-4 z-50 space-y-2 max-w-md">
-        <AnimatePresence>
+      <div className="fixed bottom-4 right-4 z-50 flex flex-col gap-2 max-w-md pointer-events-none">
+        <AnimatePresence mode="popLayout">
           {notifications.map((notification) => (
             <NotificationToast
               key={notification.id}
@@ -1241,17 +1238,19 @@ function NotificationToast({ notification, onRemove }: { notification: Notificat
 
   return (
     <motion.div
-      initial={{ opacity: 0, x: 100, scale: 0.95 }}
-      animate={{ opacity: 1, x: 0, scale: 1 }}
-      exit={{ opacity: 0, x: 100, scale: 0.95 }}
-      className={`relative rounded-lg border shadow-lg overflow-hidden ${colors[notification.type]}`}
+      initial={{ opacity: 0, x: 400 }}
+      animate={{ opacity: 1, x: 0 }}
+      exit={{ opacity: 0, x: 400 }}
+      transition={{ type: 'spring', stiffness: 300, damping: 30 }}
+      layout
+      className={`relative rounded-lg border shadow-lg overflow-hidden pointer-events-auto ${colors[notification.type]}`}
     >
       <div className="p-4 pr-10">
         <div className="font-medium">{notification.message}</div>
       </div>
       <button
         onClick={() => onRemove(notification.id)}
-        className="absolute top-2 right-2 p-1 rounded hover:bg-black/10 transition"
+        className="absolute top-2 right-2 p-1 rounded hover:bg-black/10 transition pointer-events-auto"
       >
         <X className="w-4 h-4" />
       </button>
