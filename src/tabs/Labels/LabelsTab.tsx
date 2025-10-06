@@ -16,7 +16,8 @@ import {
   PlayCircle,
   Lock,
   ChevronLeft,
-  Pencil
+  Pencil,
+  X
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { supabase } from '../../lib/supabase';
@@ -60,6 +61,13 @@ interface DeletedItem {
 interface UpdaterStatus {
   last_run: string | null;        // ISO or null
   cooldown_seconds: number;       // e.g. 86400
+}
+
+interface Notification {
+  id: string;
+  type: 'success' | 'error' | 'info';
+  message: string;
+  duration?: number;
 }
 
 const LABELS_BUCKET = 'labels';
@@ -116,9 +124,10 @@ export default function LabelsTab() {
   const [files, setFiles] = useState<FileItem[]>([]);
   const uploaderRef = useRef<HTMLInputElement | null>(null);
   const [uploading, setUploading] = useState(false);
-  const [uploadError, setUploadError] = useState<string | null>(null);
-  const [uploadSuccess, setUploadSuccess] = useState(false);
   const [showDebug, setShowDebug] = useState(false);
+
+  // Notification system
+  const [notifications, setNotifications] = useState<Notification[]>([]);
 
   // Preview modal
   const [previewOpen, setPreviewOpen] = useState(false);
@@ -130,6 +139,16 @@ export default function LabelsTab() {
 
   // simple debounce map for auto-save
   const debounceTimers = useRef<Record<UUID, any>>({});
+
+  // Notification helper
+  const addNotification = (type: 'success' | 'error' | 'info', message: string, duration = 5000) => {
+    const id = `${Date.now()}-${Math.random()}`;
+    setNotifications((prev) => [...prev, { id, type, message, duration }]);
+  };
+
+  const removeNotification = (id: string) => {
+    setNotifications((prev) => prev.filter((n) => n.id !== id));
+  };
 
   // ------ Bootstrap ------
   useEffect(() => {
@@ -150,6 +169,22 @@ export default function LabelsTab() {
         if (profile?.role === 'admin') admin = true;
       }
       setIsAdmin(admin);
+
+      // Check if storage bucket exists
+      try {
+        const { data: buckets, error: bucketsError } = await supabase.storage.listBuckets();
+        console.log('[Labels] Available buckets:', buckets);
+
+        const labelsBucket = buckets?.find(b => b.name === LABELS_BUCKET);
+        if (!labelsBucket) {
+          console.warn('[Labels] Labels bucket not found! Storage uploads will fail.');
+          addNotification('error', 'Storage bucket not configured. Please contact administrator.', 10000);
+        } else {
+          console.log('[Labels] Labels bucket found:', labelsBucket);
+        }
+      } catch (e) {
+        console.error('[Labels] Error checking buckets:', e);
+      }
 
       // Products
       const { data: prod } = await supabase.from('products').select('*').order('created_at', { ascending: true });
@@ -383,6 +418,7 @@ export default function LabelsTab() {
 
         if (uploadError) {
           console.error(`[Labels] Storage upload error for ${f.name}:`, uploadError);
+          addNotification('error', `Upload failed for ${f.name}: ${uploadError.message || 'Unknown error'}`, 8000);
           errorCount++;
           continue;
         }
@@ -397,6 +433,7 @@ export default function LabelsTab() {
 
         if (queryError) {
           console.error(`[Labels] Query error for ${f.name}:`, queryError);
+          addNotification('error', `Database query error: ${queryError.message}`, 8000);
           errorCount++;
           continue;
         }
@@ -414,6 +451,7 @@ export default function LabelsTab() {
 
           if (updateError) {
             console.error(`[Labels] Update error for ${f.name}:`, updateError);
+            addNotification('error', `Failed to update file record: ${updateError.message}`, 8000);
             errorCount++;
           } else {
             console.log(`[Labels] Updated file record for ${f.name}`);
@@ -435,6 +473,7 @@ export default function LabelsTab() {
 
           if (insertError) {
             console.error(`[Labels] Insert error for ${f.name}:`, insertError);
+            addNotification('error', `Failed to create file record: ${insertError.message}`, 8000);
             errorCount++;
           } else {
             console.log(`[Labels] Created file record for ${f.name}:`, insertedFile);
@@ -446,10 +485,11 @@ export default function LabelsTab() {
       console.log(`[Labels] Upload complete: ${successCount} success, ${errorCount} errors`);
 
       if (errorCount > 0) {
-        setUploadError(`${errorCount} file(s) failed to upload`);
-      } else {
-        setUploadSuccess(true);
-        setTimeout(() => setUploadSuccess(false), 3000);
+        addNotification('error', `${errorCount} file(s) failed to upload`);
+      }
+
+      if (successCount > 0) {
+        addNotification('success', `${successCount} file(s) uploaded successfully`);
       }
 
       if (uploaderRef.current) {
@@ -459,7 +499,7 @@ export default function LabelsTab() {
       await loadFiles(p);
     } catch (e) {
       console.error('[Labels] Unexpected error during upload:', e);
-      setUploadError('An unexpected error occurred');
+      addNotification('error', 'An unexpected error occurred during upload');
     } finally {
       setUploading(false);
     }
@@ -980,28 +1020,6 @@ export default function LabelsTab() {
                 <UploadCloud className="w-4 h-4" />
                 Import Files
               </button>
-
-              {uploadSuccess && (
-                <motion.div
-                  initial={{ opacity: 0, x: -10 }}
-                  animate={{ opacity: 1, x: 0 }}
-                  exit={{ opacity: 0 }}
-                  className="px-3 py-2 rounded-lg bg-green-50 border border-green-200 text-green-700 text-sm font-medium"
-                >
-                  Upload successful!
-                </motion.div>
-              )}
-
-              {uploadError && (
-                <motion.div
-                  initial={{ opacity: 0, x: -10 }}
-                  animate={{ opacity: 1, x: 0 }}
-                  className="px-3 py-2 rounded-lg bg-red-50 border border-red-200 text-red-700 text-sm font-medium flex items-center gap-2"
-                >
-                  {uploadError}
-                  <button onClick={() => setUploadError(null)} className="hover:text-red-900">×</button>
-                </motion.div>
-              )}
             </div>
           </div>
 
@@ -1066,15 +1084,18 @@ export default function LabelsTab() {
                 </motion.div>
               ))}
 
-            {/* Empty state */}
-            {files.filter((f) => (f.isArchive ? isAdmin : true)).length === 0 && (
-              <div className="col-span-2 rounded-2xl p-8 bg-white/30 border border-white/30 text-center">
-                <FileText className="w-12 h-12 text-gray-400 mx-auto mb-3" />
-                <div className="text-gray-600 font-medium mb-1">No files yet</div>
-                <div className="text-sm text-gray-500">Upload files to get started</div>
-              </div>
-            )}
           </div>
+
+          {/* Empty state - centered below */}
+          {files.filter((f) => (f.isArchive ? isAdmin : true)).length === 0 && (
+            <div className="flex items-center justify-center py-16">
+              <div className="rounded-2xl p-12 bg-white/30 border border-white/30 text-center max-w-md">
+                <FileText className="w-16 h-16 text-gray-400 mx-auto mb-4" />
+                <div className="text-gray-600 font-medium text-lg mb-2">No files yet</div>
+                <div className="text-sm text-gray-500">Upload files using the "Add Files" button above</div>
+              </div>
+            </div>
+          )}
         </div>
       )}
 
@@ -1169,6 +1190,78 @@ export default function LabelsTab() {
           </motion.div>
         )}
       </AnimatePresence>
+
+      {/* Notification System - Bottom Right */}
+      <div className="fixed bottom-4 right-4 z-50 space-y-2 max-w-md">
+        <AnimatePresence>
+          {notifications.map((notification) => (
+            <NotificationToast
+              key={notification.id}
+              notification={notification}
+              onRemove={removeNotification}
+            />
+          ))}
+        </AnimatePresence>
+      </div>
     </div>
+  );
+}
+
+function NotificationToast({ notification, onRemove }: { notification: Notification; onRemove: (id: string) => void }) {
+  const [progress, setProgress] = useState(100);
+  const duration = notification.duration || 5000;
+
+  useEffect(() => {
+    const startTime = Date.now();
+    const interval = setInterval(() => {
+      const elapsed = Date.now() - startTime;
+      const remaining = Math.max(0, 100 - (elapsed / duration) * 100);
+      setProgress(remaining);
+
+      if (remaining === 0) {
+        clearInterval(interval);
+        onRemove(notification.id);
+      }
+    }, 50);
+
+    return () => clearInterval(interval);
+  }, [notification.id, duration, onRemove]);
+
+  const colors = {
+    success: 'bg-green-50 border-green-200 text-green-800',
+    error: 'bg-red-50 border-red-200 text-red-800',
+    info: 'bg-blue-50 border-blue-200 text-blue-800',
+  };
+
+  const progressColors = {
+    success: 'bg-green-500',
+    error: 'bg-red-500',
+    info: 'bg-blue-500',
+  };
+
+  return (
+    <motion.div
+      initial={{ opacity: 0, x: 100, scale: 0.95 }}
+      animate={{ opacity: 1, x: 0, scale: 1 }}
+      exit={{ opacity: 0, x: 100, scale: 0.95 }}
+      className={`relative rounded-lg border shadow-lg overflow-hidden ${colors[notification.type]}`}
+    >
+      <div className="p-4 pr-10">
+        <div className="font-medium">{notification.message}</div>
+      </div>
+      <button
+        onClick={() => onRemove(notification.id)}
+        className="absolute top-2 right-2 p-1 rounded hover:bg-black/10 transition"
+      >
+        <X className="w-4 h-4" />
+      </button>
+      <div className="h-1 bg-black/10">
+        <motion.div
+          className={`h-full ${progressColors[notification.type]}`}
+          style={{ width: `${progress}%` }}
+          transition={{ duration: 0.05, ease: 'linear' }}
+        />
+      </div>
+    </motion.div>
   );
 }
