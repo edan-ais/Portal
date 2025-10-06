@@ -115,6 +115,10 @@ export default function LabelsTab() {
   // Files in current folder
   const [files, setFiles] = useState<FileItem[]>([]);
   const uploaderRef = useRef<HTMLInputElement | null>(null);
+  const [uploading, setUploading] = useState(false);
+  const [uploadError, setUploadError] = useState<string | null>(null);
+  const [uploadSuccess, setUploadSuccess] = useState(false);
+  const [showDebug, setShowDebug] = useState(false);
 
   // Preview modal
   const [previewOpen, setPreviewOpen] = useState(false);
@@ -175,9 +179,17 @@ export default function LabelsTab() {
   // When entering a folder, load files
   useEffect(() => {
     (async () => {
-      if (!selectedProductId) return;
+      if (!selectedProductId) {
+        console.log('[Labels] No product selected, clearing files');
+        setFiles([]);
+        return;
+      }
       const p = products.find((x) => x.id === selectedProductId);
-      if (!p) return;
+      if (!p) {
+        console.log('[Labels] Product not found for id:', selectedProductId);
+        return;
+      }
+      console.log('[Labels] Effect: Loading files for selected product:', p.name);
       await ensureProductPlaceholders(p);
       await loadFiles(p);
     })();
@@ -248,12 +260,21 @@ export default function LabelsTab() {
     } catch (_) {}
   }
   async function loadFiles(product: Product) {
-    const { data: dbFiles } = await supabase
+    console.log('[Labels] Loading files for product:', product.id, product.name, product.folder_path);
+
+    const { data: dbFiles, error } = await supabase
       .from('files')
       .select('*')
       .eq('folder_id', product.id)
       .eq('is_trashed', false)
       .order('created_at', { ascending: false });
+
+    if (error) {
+      console.error('[Labels] Error loading files:', error);
+      return;
+    }
+
+    console.log('[Labels] Loaded files from DB:', dbFiles);
 
     const fileItems: FileItem[] = (dbFiles || []).map((f) => ({
       name: f.name,
@@ -264,6 +285,7 @@ export default function LabelsTab() {
       isArchive: f.file_path.includes(`/${ARCHIVE_DIR}/`)
     }));
 
+    console.log('[Labels] Setting files state:', fileItems);
     setFiles(fileItems);
   }
   async function signUrl(path: string) {
@@ -326,26 +348,62 @@ export default function LabelsTab() {
   }
 
   async function handleUpload(filesToUpload: FileList | null) {
-    if (!filesToUpload || !selectedProductId) return;
+    if (!filesToUpload || !selectedProductId) {
+      console.log('[Labels] Upload aborted: no files or no product selected');
+      return;
+    }
+
     const p = products.find((x) => x.id === selectedProductId);
-    if (!p) return;
+    if (!p) {
+      console.error('[Labels] Upload aborted: product not found');
+      return;
+    }
 
-    const { data: sessionRes } = await supabase.auth.getSession();
-    const userId = sessionRes?.session?.user?.id || null;
+    console.log('[Labels] Starting upload for product:', p.id, p.name, p.folder_path);
+    console.log('[Labels] Files to upload:', Array.from(filesToUpload).map(f => f.name));
 
-    for (const f of Array.from(filesToUpload)) {
-      const dest = `${p.folder_path}${f.name}`;
-      const { error: uploadError } = await supabase.storage.from(LABELS_BUCKET).upload(dest, f, { upsert: true, contentType: f.type });
+    setUploading(true);
+    setUploadError(null);
+    setUploadSuccess(false);
 
-      if (!uploadError) {
-        const { data: existingFile } = await supabase
+    try {
+      const { data: sessionRes } = await supabase.auth.getSession();
+      const userId = sessionRes?.session?.user?.id || null;
+
+      let successCount = 0;
+      let errorCount = 0;
+
+      for (const f of Array.from(filesToUpload)) {
+        const dest = `${p.folder_path}${f.name}`;
+        console.log(`[Labels] Uploading file: ${f.name} to ${dest}`);
+
+        const { error: uploadError } = await supabase.storage
+          .from(LABELS_BUCKET)
+          .upload(dest, f, { upsert: true, contentType: f.type });
+
+        if (uploadError) {
+          console.error(`[Labels] Storage upload error for ${f.name}:`, uploadError);
+          errorCount++;
+          continue;
+        }
+
+        console.log(`[Labels] Storage upload success for ${f.name}`);
+
+        const { data: existingFile, error: queryError } = await supabase
           .from('files')
           .select('id')
           .eq('file_path', dest)
           .maybeSingle();
 
+        if (queryError) {
+          console.error(`[Labels] Query error for ${f.name}:`, queryError);
+          errorCount++;
+          continue;
+        }
+
         if (existingFile) {
-          await supabase
+          console.log(`[Labels] Updating existing file record for ${f.name}:`, existingFile.id);
+          const { error: updateError } = await supabase
             .from('files')
             .update({
               file_size: f.size,
@@ -353,19 +411,58 @@ export default function LabelsTab() {
               updated_at: new Date().toISOString(),
             })
             .eq('id', existingFile.id);
+
+          if (updateError) {
+            console.error(`[Labels] Update error for ${f.name}:`, updateError);
+            errorCount++;
+          } else {
+            console.log(`[Labels] Updated file record for ${f.name}`);
+            successCount++;
+          }
         } else {
-          await supabase.from('files').insert({
-            folder_id: selectedProductId,
-            name: f.name,
-            file_path: dest,
-            file_size: f.size,
-            mime_type: f.type || 'application/octet-stream',
-            created_by: userId,
-          });
+          console.log(`[Labels] Creating new file record for ${f.name}`);
+          const { data: insertedFile, error: insertError } = await supabase
+            .from('files')
+            .insert({
+              folder_id: selectedProductId,
+              name: f.name,
+              file_path: dest,
+              file_size: f.size,
+              mime_type: f.type || 'application/octet-stream',
+              created_by: userId,
+            })
+            .select();
+
+          if (insertError) {
+            console.error(`[Labels] Insert error for ${f.name}:`, insertError);
+            errorCount++;
+          } else {
+            console.log(`[Labels] Created file record for ${f.name}:`, insertedFile);
+            successCount++;
+          }
         }
       }
+
+      console.log(`[Labels] Upload complete: ${successCount} success, ${errorCount} errors`);
+
+      if (errorCount > 0) {
+        setUploadError(`${errorCount} file(s) failed to upload`);
+      } else {
+        setUploadSuccess(true);
+        setTimeout(() => setUploadSuccess(false), 3000);
+      }
+
+      if (uploaderRef.current) {
+        uploaderRef.current.value = '';
+      }
+
+      await loadFiles(p);
+    } catch (e) {
+      console.error('[Labels] Unexpected error during upload:', e);
+      setUploadError('An unexpected error occurred');
+    } finally {
+      setUploading(false);
     }
-    await loadFiles(p);
   }
   function onDrop(e: React.DragEvent<HTMLDivElement>) {
     e.preventDefault();
@@ -672,8 +769,52 @@ export default function LabelsTab() {
             <Trash2 className="w-4 h-4" />
             Trash
           </button>
+
+          {/* Debug toggle */}
+          {isAdmin && (
+            <button
+              className="px-2 py-2 rounded-lg hover:bg-white/10 transition text-xs text-gray-500"
+              onClick={() => setShowDebug(!showDebug)}
+              title="Toggle debug panel"
+            >
+              {showDebug ? '🔍 Hide Debug' : '🔍'}
+            </button>
+          )}
         </div>
       </div>
+
+      {/* Debug panel */}
+      {showDebug && isAdmin && (
+        <motion.div
+          initial={{ opacity: 0, y: -10 }}
+          animate={{ opacity: 1, y: 0 }}
+          className="p-4 bg-gray-900 text-gray-100 rounded-xl text-xs font-mono"
+        >
+          <div className="font-bold mb-2">Debug Info</div>
+          <div>Selected Product ID: {selectedProductId || 'none'}</div>
+          <div>Files Count: {files.length}</div>
+          <div>Uploading: {uploading ? 'Yes' : 'No'}</div>
+          <div>Products: {products.length}</div>
+          {selectedProduct && (
+            <div className="mt-2 border-t border-gray-700 pt-2">
+              <div>Product: {selectedProduct.name}</div>
+              <div>Folder Path: {selectedProduct.folder_path}</div>
+              <div>Product ID: {selectedProduct.id}</div>
+            </div>
+          )}
+          {files.length > 0 && (
+            <div className="mt-2 border-t border-gray-700 pt-2">
+              <div className="font-bold">Files:</div>
+              {files.slice(0, 5).map((f, i) => (
+                <div key={i} className="ml-2">
+                  • {f.name} ({f.path})
+                </div>
+              ))}
+              {files.length > 5 && <div className="ml-2">... and {files.length - 5} more</div>}
+            </div>
+          )}
+        </motion.div>
+      )}
 
       {/* Updater feedback (minimal) */}
       <AnimatePresence>
@@ -819,23 +960,48 @@ export default function LabelsTab() {
                 multiple
                 onChange={(e) => handleUpload(e.target.files)}
                 accept="application/pdf,image/*"
+                disabled={uploading}
               />
               <button
                 onClick={() => uploaderRef.current?.click()}
-                className="glass-button px-3 py-2 rounded-lg text-gray-800 font-quicksand font-medium flex items-center gap-2"
+                className="glass-button px-3 py-2 rounded-lg text-gray-800 font-quicksand font-medium flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
                 title="Add files"
+                disabled={uploading}
               >
                 <UploadCloud className="w-4 h-4" />
-                Add Files
+                {uploading ? 'Uploading...' : 'Add Files'}
               </button>
               <button
                 onClick={() => uploaderRef.current?.click()}
-                className="glass-button px-3 py-2 rounded-lg text-gray-800 font-quicksand font-medium flex items-center gap-2"
+                className="glass-button px-3 py-2 rounded-lg text-gray-800 font-quicksand font-medium flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
                 title="Import files"
+                disabled={uploading}
               >
                 <UploadCloud className="w-4 h-4" />
                 Import Files
               </button>
+
+              {uploadSuccess && (
+                <motion.div
+                  initial={{ opacity: 0, x: -10 }}
+                  animate={{ opacity: 1, x: 0 }}
+                  exit={{ opacity: 0 }}
+                  className="px-3 py-2 rounded-lg bg-green-50 border border-green-200 text-green-700 text-sm font-medium"
+                >
+                  Upload successful!
+                </motion.div>
+              )}
+
+              {uploadError && (
+                <motion.div
+                  initial={{ opacity: 0, x: -10 }}
+                  animate={{ opacity: 1, x: 0 }}
+                  className="px-3 py-2 rounded-lg bg-red-50 border border-red-200 text-red-700 text-sm font-medium flex items-center gap-2"
+                >
+                  {uploadError}
+                  <button onClick={() => setUploadError(null)} className="hover:text-red-900">×</button>
+                </motion.div>
+              )}
             </div>
           </div>
 
@@ -858,8 +1024,13 @@ export default function LabelsTab() {
             {/* Files */}
             {files
               .filter((f) => (f.isArchive ? isAdmin : true))
-              .map((f) => (
-                <div key={f.path} className="rounded-2xl p-4 bg-white/50 border border-white/40 hover:shadow-lg transition">
+              .map((f, idx) => (
+                <motion.div
+                  key={f.path}
+                  initial={{ opacity: 0, y: 10 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  transition={{ delay: idx * 0.05 }}
+                  className="rounded-2xl p-4 bg-white/50 border border-white/40 hover:shadow-lg transition">
                   <div className="flex items-start justify-between gap-2">
                     <div className="flex items-center gap-2">
                       <FileText className="w-4 h-4 text-gray-600" />
@@ -892,8 +1063,17 @@ export default function LabelsTab() {
                       </>
                     )}
                   </div>
-                </div>
+                </motion.div>
               ))}
+
+            {/* Empty state */}
+            {files.filter((f) => (f.isArchive ? isAdmin : true)).length === 0 && (
+              <div className="col-span-2 rounded-2xl p-8 bg-white/30 border border-white/30 text-center">
+                <FileText className="w-12 h-12 text-gray-400 mx-auto mb-3" />
+                <div className="text-gray-600 font-medium mb-1">No files yet</div>
+                <div className="text-sm text-gray-500">Upload files to get started</div>
+              </div>
+            )}
           </div>
         </div>
       )}
