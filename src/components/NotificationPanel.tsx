@@ -72,10 +72,10 @@ export default function NotificationPanel({ isOpen, onClose, onNavigate }: Notif
             animate={{ opacity: 1, y: 0, scale: 1 }}
             exit={{ opacity: 0, y: -20, scale: 0.95 }}
             transition={{ type: 'spring', damping: 25, stiffness: 300 }}
-            className="fixed top-20 right-8 w-96 max-h-[80vh] bg-white rounded-2xl shadow-2xl border border-blue-100 z-50 overflow-hidden"
+            className="fixed top-20 bottom-16 right-8 w-96 bg-white rounded-2xl shadow-2xl border border-blue-100 z-50 flex flex-col"
             onClick={(e) => e.stopPropagation()}
           >
-            <div className="p-6 border-b border-blue-100 flex justify-between items-center">
+            <div className="p-6 border-b border-blue-100 flex justify-between items-center flex-shrink-0">
               <h3 className="text-xl font-bold text-gray-800 font-quicksand">Notifications</h3>
               <button
                 onClick={onClose}
@@ -84,7 +84,7 @@ export default function NotificationPanel({ isOpen, onClose, onNavigate }: Notif
                 <X className="w-5 h-5 text-gray-600" />
               </button>
             </div>
-            <div className="overflow-y-auto max-h-[calc(80vh-5rem)]">
+            <div className="overflow-y-auto flex-1">
               {loading ? (
                 <div className="p-6 text-center text-gray-500">Loading...</div>
               ) : notifications.length === 0 ? (
