@@ -13,7 +13,10 @@ import {
   Eye,
   Printer,
   Save,
-  PlayCircle
+  PlayCircle,
+  Lock,
+  ChevronLeft,
+  Pencil
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { supabase } from '../../lib/supabase';
@@ -25,14 +28,14 @@ interface Product {
   name: string;
   slug: string;
   days_out: number;
-  folder_path: string;   
+  folder_path: string; // e.g., "fudge/"
   created_at?: string;
 }
 
 interface FileItem {
-  name: string;          
-  path: string;          
-  signedUrl?: string;     
+  name: string;            // filename.pdf
+  path: string;            // productSlug/filename.pdf, or productSlug/archive/filename.pdf
+  signedUrl?: string;      // for viewing/printing
   isArchive?: boolean;
   mimeType?: string;
   created_at?: string;
@@ -44,64 +47,97 @@ interface Profile {
   role?: string | null;
 }
 
+interface DeletedItem {
+  id: string;
+  kind: 'file' | 'product';
+  product_id: string | null;
+  original_path: string | null;   // for files or folders
+  trash_path: string | null;      // storage path inside _trash/
+  product_snapshot: any | null;   // JSON of product row when kind='product'
+  deleted_at: string;             // ISO
+}
+
+interface UpdaterStatus {
+  last_run: string | null;        // ISO or null
+  cooldown_seconds: number;       // e.g. 86400
+}
+
 const LABELS_BUCKET = 'labels';
 const ARCHIVE_DIR = 'archive';
+const TRASH_PREFIX = '_trash/';
 
 function slugify(input: string) {
   return input.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)+/g, '');
 }
 
+/**
+ * Expiration Rule (UPDATED): add daysOut, then snap forward to the 1st or 15th,
+ * whichever is the next anchor date at/after target. If after the 15th, roll to 1st next month.
+ */
 function computeExpiry(daysOut: number, now = new Date()) {
   const target = new Date(now);
   target.setDate(target.getDate() + daysOut);
-
   const y = target.getFullYear();
   const m = target.getMonth();
   const d = target.getDate();
-
   if (d <= 1) return new Date(y, m, 1);
-  if (d <= 5) return new Date(y, m, 5);
+  if (d <= 15) return new Date(y, m, 15);
   return new Date(y, m + 1, 1);
 }
-
-function formatDate(d?: Date) {
+function formatDate(d?: Date | null) {
   if (!d) return '—';
   return d.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
 }
+function addSeconds(ts: Date, sec: number) {
+  const n = new Date(ts);
+  n.setSeconds(n.getSeconds() + sec);
+  return n;
+}
 
 export default function LabelsTab() {
+  // ------ Global state ------
   const [loading, setLoading] = useState(true);
   const [heartbeatOk, setHeartbeatOk] = useState<boolean | null>(null);
   const [heartbeatAt, setHeartbeatAt] = useState<Date | null>(null);
+  const [updaterStatus, setUpdaterStatus] = useState<'idle' | 'running' | 'done' | 'error'>('idle');
+  const [updaterSummary, setUpdaterSummary] = useState<any[]>([]);
+  const [statusMeta, setStatusMeta] = useState<UpdaterStatus | null>(null);
+
   const [products, setProducts] = useState<Product[]>([]);
-  const [selectedProductId, setSelectedProductId] = useState<UUID | null>(null);
-  const [files, setFiles] = useState<FileItem[]>([]);
-  const [pdfPreview, setPdfPreview] = useState<FileItem | null>(null);
+  const [selectedProductId, setSelectedProductId] = useState<UUID | null>(null); // null => grid, not folder view
+  const [isAdmin, setIsAdmin] = useState(false);
 
-  const [showForm, setShowForm] = useState(false);
-  const [productForm, setProductForm] = useState<{ name: string; days_out: number }>({ name: '', days_out: 60 });
-
+  // Edits + saving
   const [editBuffer, setEditBuffer] = useState<Record<UUID, { name: string; days_out: number }>>({});
   const [autoSaving, setAutoSaving] = useState(false);
   const [manualSaveDirty, setManualSaveDirty] = useState(false);
 
-  const [isAdmin, setIsAdmin] = useState(false);
-  const [updaterStatus, setUpdaterStatus] = useState<'idle' | 'running' | 'done' | 'error'>('idle');
-  const [updaterSummary, setUpdaterSummary] = useState<any[]>([]);
-
+  // Files in current folder
+  const [files, setFiles] = useState<FileItem[]>([]);
   const uploaderRef = useRef<HTMLInputElement | null>(null);
+
+  // Preview modal
+  const [previewOpen, setPreviewOpen] = useState(false);
+  const [previewFile, setPreviewFile] = useState<FileItem | null>(null);
+
+  // Trash modal
+  const [trashOpen, setTrashOpen] = useState(false);
+  const [recentlyDeleted, setRecentlyDeleted] = useState<DeletedItem[]>([]);
+
+  // simple debounce map for auto-save
   const debounceTimers = useRef<Record<UUID, any>>({});
 
+  // ------ Bootstrap ------
   useEffect(() => {
     (async () => {
       setLoading(true);
-     
+
+      // Admin detection
       const { data: sessionRes } = await supabase.auth.getSession();
       const user = sessionRes?.session?.user;
       let admin = false;
-      if (user?.app_metadata && (user.app_metadata as any)?.role === 'admin') {
-        admin = true;
-      } else if (user?.id) {
+      if (user?.app_metadata && (user.app_metadata as any)?.role === 'admin') admin = true;
+      else if (user?.id) {
         const { data: profile } = await supabase
           .from('profiles')
           .select('id, role')
@@ -111,9 +147,11 @@ export default function LabelsTab() {
       }
       setIsAdmin(admin);
 
+      // Products
       const { data: prod } = await supabase.from('products').select('*').order('created_at', { ascending: true });
       let list: Product[] = prod || [];
       if (!list || list.length === 0) {
+        // seed two defaults
         const seed = [
           { name: 'Fudge', slug: 'fudge', days_out: 60, folder_path: 'fudge/' },
           { name: 'Rice Crispy Treats', slug: 'rice-crispy-treats', days_out: 75, folder_path: 'rice-crispy-treats/' }
@@ -122,17 +160,19 @@ export default function LabelsTab() {
         list = inserted || [];
       }
       setProducts(list);
-      if (list.length && !selectedProductId) setSelectedProductId(list[0].id);
 
+      // Heartbeat + status
       await pingHeartbeat();
+      await fetchStatusMeta();
       const iv = setInterval(pingHeartbeat, 30_000);
 
       setLoading(false);
       return () => clearInterval(iv);
     })();
-  
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // When entering a folder, load files
   useEffect(() => {
     (async () => {
       if (!selectedProductId) return;
@@ -140,11 +180,11 @@ export default function LabelsTab() {
       if (!p) return;
       await ensureProductPlaceholders(p);
       await loadFiles(p);
-      setPdfPreview(null);
     })();
- 
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedProductId, products.length]);
 
+  // ------ Monitor & Updater ------
   const pingHeartbeat = async () => {
     try {
       const url = `${import.meta.env.VITE_LABEL_UPDATER_URL}/`;
@@ -155,7 +195,15 @@ export default function LabelsTab() {
       setHeartbeatOk(false);
     }
   };
-
+  const fetchStatusMeta = async () => {
+    try {
+      const url = `${import.meta.env.VITE_LABEL_UPDATER_URL}/api/status`;
+      const res = await fetch(url, { method: 'GET' });
+      if (!res.ok) return;
+      const data: UpdaterStatus = await res.json();
+      setStatusMeta(data);
+    } catch { /* noop */ }
+  };
   const triggerUpdater = async () => {
     try {
       setUpdaterStatus('running');
@@ -168,41 +216,37 @@ export default function LabelsTab() {
       const data = await res.json();
       setUpdaterSummary(data.summary || []);
       setUpdaterStatus('done');
-     
-      const p = products.find((x) => x.id === selectedProductId);
-      if (p) await loadFiles(p);
+      await fetchStatusMeta();
+      // refresh current folder if any
+      if (selectedProductId) {
+        const p = products.find((x) => x.id === selectedProductId);
+        if (p) await loadFiles(p);
+      }
     } catch (e) {
       console.error(e);
       setUpdaterStatus('error');
     }
   };
 
+  // ------ Storage helpers ------
   async function ensureProductPlaceholders(product: Product) {
-    
     const keepMain = `${product.folder_path}.keep`;
     const keepArchive = `${product.folder_path}${ARCHIVE_DIR}/.keep`;
 
     try {
-      
       const listMain = await supabase.storage.from(LABELS_BUCKET).list(product.folder_path, { limit: 1 });
       if (!listMain.data || listMain.data.length === 0) {
-        await supabase.storage
-          .from(LABELS_BUCKET)
-          .upload(keepMain, new Blob([''], { type: 'text/plain' }), { upsert: true });
+        await supabase.storage.from(LABELS_BUCKET).upload(keepMain, new Blob([''], { type: 'text/plain' }), { upsert: true });
       }
     } catch (_) {}
 
     try {
-     
       const listArc = await supabase.storage.from(LABELS_BUCKET).list(`${product.folder_path}${ARCHIVE_DIR}`, { limit: 1 });
       if (!listArc.data || listArc.data.length === 0) {
-        await supabase.storage
-          .from(LABELS_BUCKET)
-          .upload(keepArchive, new Blob([''], { type: 'text/plain' }), { upsert: true });
+        await supabase.storage.from(LABELS_BUCKET).upload(keepArchive, new Blob([''], { type: 'text/plain' }), { upsert: true });
       }
     } catch (_) {}
   }
-
   async function loadFiles(product: Product) {
     const root = await supabase.storage.from(LABELS_BUCKET).list(product.folder_path, { limit: 1000 });
     const arch = await supabase.storage.from(LABELS_BUCKET).list(`${product.folder_path}${ARCHIVE_DIR}`, { limit: 1000 });
@@ -221,36 +265,24 @@ export default function LabelsTab() {
 
     setFiles([...(toItems(root.data || [], false)), ...(toItems(arch.data || [], true))]);
   }
-
   async function signUrl(path: string) {
     const { data, error } = await supabase.storage.from(LABELS_BUCKET).createSignedUrl(path, 60 * 10);
     if (error) return null;
     return data?.signedUrl || null;
   }
 
+  // ------ File actions ------
   async function openFile(file: FileItem) {
     const url = await signUrl(file.path);
     if (!url) return;
-    if ((file.mimeType && file.mimeType.includes('pdf')) || file.name.toLowerCase().endsWith('.pdf')) {
-      setPdfPreview({ ...file, signedUrl: url });
-    } else {
-      window.open(url, '_blank', 'noopener,noreferrer');
-    }
+    setPreviewFile({ ...file, signedUrl: url });
+    setPreviewOpen(true);
   }
-
   async function printFile(file: FileItem) {
     const url = await signUrl(file.path);
     if (!url) return;
     window.open(url, '_blank', 'noopener,noreferrer');
   }
-
-  async function deleteFile(file: FileItem) {
-    await supabase.storage.from(LABELS_BUCKET).remove([file.path]);
-    const p = products.find((x) => x.id === selectedProductId);
-    if (p) await loadFiles(p);
-    if (pdfPreview && pdfPreview.path === file.path) setPdfPreview(null);
-  }
-
   async function moveToArchive(file: FileItem) {
     if (file.isArchive) return;
     const p = products.find((x) => x.id === selectedProductId);
@@ -258,7 +290,26 @@ export default function LabelsTab() {
     const dest = `${p.folder_path}${ARCHIVE_DIR}/${file.name}`;
     await supabase.storage.from(LABELS_BUCKET).move(file.path, dest);
     await loadFiles(p);
-    if (pdfPreview && pdfPreview.path === file.path) setPdfPreview(null);
+  }
+
+  // Soft delete: move to TRASH_PREFIX and record in deleted_items
+  async function softDeleteFile(file: FileItem) {
+    const p = products.find((x) => x.id === selectedProductId);
+    if (!p) return;
+    const stamp = Date.now();
+    const trashPath = `${TRASH_PREFIX}${file.path}.${stamp}`;
+    await supabase.storage.from(LABELS_BUCKET).move(file.path, trashPath);
+    await supabase.from('deleted_items').insert({
+      kind: 'file',
+      product_id: p.id,
+      original_path: file.path,
+      trash_path: trashPath
+    });
+    await loadFiles(p);
+    if (previewFile && previewFile.path === file.path) {
+      setPreviewOpen(false);
+      setPreviewFile(null);
+    }
   }
 
   async function handleUpload(filesToUpload: FileList | null) {
@@ -272,7 +323,6 @@ export default function LabelsTab() {
     }
     await loadFiles(p);
   }
-
   function onDrop(e: React.DragEvent<HTMLDivElement>) {
     e.preventDefault();
     e.stopPropagation();
@@ -283,12 +333,14 @@ export default function LabelsTab() {
     e.stopPropagation();
   }
 
-  async function createProduct() {
-    const name = productForm.name.trim();
+  // ------ Product CRUD / edits ------
+  async function addFolder() {
+    const name = window.prompt('Folder (Product) Name');
     if (!name) return;
+    const daysStr = window.prompt('Days Out', '60');
+    const days_out = Math.max(1, Number(daysStr || 60));
     const slug = slugify(name);
     const folder_path = `${slug}/`;
-    const days_out = Math.max(1, Math.floor(productForm.days_out || 1));
     const { data: inserted } = await supabase
       .from('products')
       .insert([{ name, slug, days_out, folder_path }])
@@ -296,35 +348,175 @@ export default function LabelsTab() {
       .single<Product>();
     if (inserted) {
       setProducts((p) => [...p, inserted]);
-      setSelectedProductId(inserted.id);
       await ensureProductPlaceholders(inserted);
-      await loadFiles(inserted);
-      setShowForm(false);
-      setProductForm({ name: '', days_out: 60 });
+    }
+  }
+  async function importFolder() {
+    const folder = window.prompt('Existing folder path in Storage (e.g., "legacy-fudge/")');
+    if (!folder) return;
+    const name = window.prompt('Display Name');
+    if (!name) return;
+    const daysStr = window.prompt('Days Out', '60');
+    const days_out = Math.max(1, Number(daysStr || 60));
+    const slug = slugify(name);
+    const folder_path = folder.endsWith('/') ? folder : `${folder}/`;
+    const { data: inserted } = await supabase
+      .from('products')
+      .insert([{ name, slug, days_out, folder_path }])
+      .select('*')
+      .single<Product>();
+    if (inserted) {
+      setProducts((p) => [...p, inserted]);
+      await ensureProductPlaceholders(inserted);
     }
   }
 
+  // Soft delete product: move all files under folder (and archive) into trash + record one product snapshot
+  async function softDeleteProduct(pid: UUID) {
+    const product = products.find((x) => x.id === pid);
+    if (!product) return;
+    // List files
+    const root = await supabase.storage.from(LABELS_BUCKET).list(product.folder_path, { limit: 1000 });
+    const arch = await supabase.storage.from(LABELS_BUCKET).list(`${product.folder_path}${ARCHIVE_DIR}`, { limit: 1000 });
+
+    const allFiles: { name: string; isArchive: boolean }[] = [
+      ...(root.data || []).filter((e: any) => e && !e.name.endsWith('.keep')).map((e: any) => ({ name: e.name, isArchive: false })),
+      ...(arch.data || []).filter((e: any) => e && !e.name.endsWith('.keep')).map((e: any) => ({ name: e.name, isArchive: true }))
+    ];
+
+    const mappings: { from: string; to: string }[] = [];
+    const stamp = Date.now();
+    for (const f of allFiles) {
+      const fromPath = `${product.folder_path}${f.isArchive ? `${ARCHIVE_DIR}/` : ''}${f.name}`;
+      const toPath = `${TRASH_PREFIX}${product.folder_path}${f.isArchive ? `${ARCHIVE_DIR}/` : ''}${f.name}.${stamp}`;
+      try {
+        await supabase.storage.from(LABELS_BUCKET).move(fromPath, toPath);
+        mappings.push({ from: fromPath, to: toPath });
+      } catch (_) {}
+    }
+
+    // record product snapshot with mappings
+    await supabase.from('deleted_items').insert({
+      kind: 'product',
+      product_id: product.id,
+      original_path: product.folder_path,
+      trash_path: `${TRASH_PREFIX}${product.folder_path}`, // base prefix
+      product_snapshot: { ...product, mappings }
+    });
+
+    // delete product row
+    await supabase.from('products').delete().eq('id', product.id);
+    setProducts((arr) => arr.filter((p) => p.id !== product.id));
+    if (selectedProductId === product.id) setSelectedProductId(null);
+  }
+
+  // Restore from trash
+  async function openTrash() {
+    setTrashOpen(true);
+    const cutoff = new Date(Date.now() - 24 * 3600 * 1000).toISOString();
+    const { data } = await supabase
+      .from('deleted_items')
+      .select('*')
+      .gte('deleted_at', cutoff)
+      .order('deleted_at', { ascending: false });
+    setRecentlyDeleted(data || []);
+  }
+  async function restoreItem(item: DeletedItem) {
+    if (item.kind === 'file') {
+      if (!item.original_path || !item.trash_path) return;
+      try {
+        await supabase.storage.from(LABELS_BUCKET).move(item.trash_path, item.original_path);
+      } catch (_) {}
+      await supabase.from('deleted_items').delete().eq('id', item.id);
+    } else {
+      // product restore: reinsert product row, move all files back
+      const snap = item.product_snapshot || {};
+      const exists = products.find((p) => p.slug === snap.slug);
+      let restoredProduct = exists;
+      if (!exists) {
+        const { data: inserted } = await supabase
+          .from('products')
+          .insert([{ name: snap.name, slug: snap.slug, days_out: snap.days_out, folder_path: snap.folder_path }])
+          .select('*')
+          .single<Product>();
+        if (inserted) {
+          setProducts((p) => [...p, inserted]);
+          restoredProduct = inserted;
+        }
+      }
+      // Move back each file from mappings (if present). If not present, attempt to move by listing trash prefix.
+      const mappings = (snap.mappings || []) as { from: string; to: string }[];
+      if (mappings.length) {
+        for (const m of mappings) {
+          try {
+            await supabase.storage.from(LABELS_BUCKET).move(m.to, m.from);
+          } catch (_) {}
+        }
+      } else if (snap.folder_path) {
+        // fallback: best-effort move any files under TRASH_PREFIX+folder_path back
+        const root = await supabase.storage.from(LABELS_BUCKET).list(`${TRASH_PREFIX}${snap.folder_path}`, { limit: 1000 });
+        for (const e of root.data || []) {
+          if (!e.name.endsWith('.keep')) {
+            await supabase.storage
+              .from(LABELS_BUCKET)
+              .move(`${TRASH_PREFIX}${snap.folder_path}${e.name}`, `${snap.folder_path}${e.name}`);
+          }
+        }
+        const arch = await supabase.storage.from(LABELS_BUCKET).list(`${TRASH_PREFIX}${snap.folder_path}${ARCHIVE_DIR}`, { limit: 1000 });
+        for (const e of arch.data || []) {
+          if (!e.name.endsWith('.keep')) {
+            await supabase.storage
+              .from(LABELS_BUCKET)
+              .move(`${TRASH_PREFIX}${snap.folder_path}${ARCHIVE_DIR}/${e.name}`, `${snap.folder_path}${ARCHIVE_DIR}/${e.name}`);
+          }
+        }
+      }
+      await supabase.from('deleted_items').delete().eq('id', item.id);
+    }
+
+    // refresh views
+    if (selectedProductId) {
+      const p = products.find((x) => x.id === selectedProductId);
+      if (p) await loadFiles(p);
+    }
+    await openTrash(); // refresh trash list
+  }
+
+  // Permanently purge expired items when trash modal opens (best-effort)
+  useEffect(() => {
+    (async () => {
+      if (!trashOpen) return;
+      const cutoff = new Date(Date.now() - 24 * 3600 * 1000).toISOString();
+      const { data } = await supabase.from('deleted_items').select('*').lt('deleted_at', cutoff);
+      const expired = data || [];
+      for (const it of expired) {
+        if (it.trash_path && it.kind === 'file') {
+          try {
+            await supabase.storage.from(LABELS_BUCKET).remove([it.trash_path]);
+          } catch (_) {}
+        }
+        await supabase.from('deleted_items').delete().eq('id', it.id);
+      }
+    })();
+  }, [trashOpen]);
+
+  // ------ Editing & Saving ------
   function bufferValue(pid: UUID, key: 'name' | 'days_out', value: string) {
     setEditBuffer((prev) => {
       const base = prev[pid] ?? {
         name: products.find((p) => p.id === pid)?.name ?? '',
         days_out: products.find((p) => p.id === pid)?.days_out ?? 60
       };
-      const next = {
-        ...base,
-        [key]: key === 'days_out' ? Number(value) || 0 : value
-      };
+      const next = { ...base, [key]: key === 'days_out' ? Number(value) || 0 : value };
       return { ...prev, [pid]: next };
     });
     setManualSaveDirty(true);
     debounceSave(pid);
   }
-
   function debounceSave(pid: UUID) {
     if (debounceTimers.current[pid]) clearTimeout(debounceTimers.current[pid]);
     debounceTimers.current[pid] = setTimeout(() => autoSave(pid), 1000);
   }
-
   async function autoSave(pid: UUID) {
     const pending = editBuffer[pid];
     if (!pending) return;
@@ -342,45 +534,41 @@ export default function LabelsTab() {
     }
     setAutoSaving(false);
   }
-
-  async function manualSave(pid: UUID) {
-    await autoSave(pid);
+  async function saveAll() {
+    // Save every pending edit
+    const ids = Object.keys(editBuffer) as UUID[];
+    for (const pid of ids) {
+      await autoSave(pid);
+    }
     setManualSaveDirty(false);
   }
 
-  async function deleteProduct(pid: UUID) {
- 
-    await supabase.from('products').delete().eq('id', pid);
-    const next = products.filter((p) => p.id !== pid);
-    setProducts(next);
-    if (selectedProductId === pid) setSelectedProductId(next[0]?.id ?? null);
-  }
-
+  // ------ Computed ------
   const selectedProduct = useMemo(
-    () => products.find((p) => p.id === selectedProductId) || null,
+    () => (selectedProductId ? products.find((p) => p.id === selectedProductId) || null : null),
     [products, selectedProductId]
   );
 
-  const fudge = useMemo(() => products.find((p) => p.name.toLowerCase().includes('fudge')), [products]);
-  const rct = useMemo(
-    () => products.find((p) => p.name.toLowerCase().includes('rice') || p.name.toLowerCase().includes('crispy')),
-    [products]
-  );
+  const nextUpdateAt = useMemo(() => {
+    if (!statusMeta?.cooldown_seconds) return null;
+    if (!statusMeta.last_run) return null;
+    const last = new Date(statusMeta.last_run);
+    return addSeconds(last, statusMeta.cooldown_seconds);
+  }, [statusMeta]);
 
-  const fudgeExpiry = fudge ? computeExpiry(fudge.days_out) : null;
-  const rctExpiry = rct ? computeExpiry(rct.days_out) : null;
-
+  // ------ UI ------
   return (
     <div className="space-y-6">
-      {/* Header */}
+      {/* ===== Header Bar (monitor + refresh + run + save + autosave tracker + trash) ===== */}
       <div className="flex items-center justify-between">
+        {/* Left: Title */}
         <div className="flex items-center gap-3">
           <Tag className="w-8 h-8 text-gray-500" />
           <h2 className="text-3xl font-bold text-gray-800 font-quicksand">Labels</h2>
         </div>
 
+        {/* Right: Monitor + buttons */}
         <div className="flex items-center gap-3">
-          {/* System Monitor */}
           <div
             className={`px-3 py-2 rounded-lg glass-card flex items-center gap-2 ${
               heartbeatOk ? 'text-emerald-600' : 'text-rose-600'
@@ -390,237 +578,189 @@ export default function LabelsTab() {
             <span className="text-sm font-medium">
               {heartbeatOk === null ? 'Checking…' : heartbeatOk ? 'System Live' : 'Offline'}
               {heartbeatAt ? (
-                <span className="text-gray-500 ml-2">
-                  • {heartbeatAt.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-                </span>
+                <span className="text-gray-500 ml-2">• {heartbeatAt.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
               ) : null}
             </span>
-            <button className="ml-2 p-1 rounded hover:bg-white/10 transition" onClick={() => pingHeartbeat()} title="Refresh">
+            <button className="ml-2 p-1 rounded hover:bg-white/10 transition" onClick={() => { pingHeartbeat(); fetchStatusMeta(); }} title="Refresh">
               <RefreshCcw className="w-4 h-4" />
             </button>
           </div>
 
           <motion.button
             onClick={triggerUpdater}
-            className="glass-button px-6 py-3 rounded-lg text-gray-800 font-quicksand font-medium flex items-center gap-2"
+            className="glass-button px-4 py-2 rounded-lg text-gray-800 font-quicksand font-medium flex items-center gap-2"
             whileHover={{ scale: 1.05 }}
             whileTap={{ scale: 0.95 }}
+            title="Run Label Updater"
           >
             <PlayCircle className="w-5 h-5" />
-            Run Label Updater
+            Run
           </motion.button>
-        </div>
-      </div>
 
-      {/* Updater status */}
-      {updaterStatus === 'running' && <div className="p-4 bg-yellow-50 rounded-xl text-yellow-700">⏳ Updating labels…</div>}
-      {updaterStatus === 'done' && (
-        <div className="p-4 bg-green-50 rounded-xl text-green-700">
-          <h3 className="font-bold mb-2">✅ Update Complete</h3>
-          <ul className="list-disc ml-5 space-y-1 text-sm">
-            {updaterSummary.map(([name, status, date]) => (
-              <li key={name}>
-                {name}: {status} {date ? `→ ${date}` : ''}
-              </li>
-            ))}
-          </ul>
-        </div>
-      )}
-      {updaterStatus === 'error' && <div className="p-4 bg-red-50 rounded-xl text-red-700">❌ Error running label updater</div>}
+          <motion.button
+            onClick={saveAll}
+            className={`glass-button px-4 py-2 rounded-lg font-quicksand font-medium flex items-center gap-2 ${manualSaveDirty ? 'text-gray-900' : 'text-gray-700'}`}
+            whileHover={{ scale: 1.05 }}
+            whileTap={{ scale: 0.95 }}
+            title="Save all changes"
+            disabled={!manualSaveDirty && !autoSaving}
+          >
+            <Save className="w-5 h-5" />
+            Save
+          </motion.button>
 
-      {/* Expiration Overview + Live PDF Preview */}
-      <div className="grid md:grid-cols-2 gap-4">
-        <div className="glass-card rounded-2xl p-6">
-          <h3 className="font-quicksand text-lg font-bold text-gray-800 mb-2">Upcoming Expirations</h3>
-          <div className="grid sm:grid-cols-2 gap-3">
-            <div className="rounded-xl p-4 bg-white/40 backdrop-blur border border-white/30">
-              <div className="flex items-center gap-2 mb-1">
-                <div className="w-2 h-2 rounded-full bg-indigo-500" />
-                <span className="text-sm text-gray-600">Fudge</span>
-              </div>
-              <div className="text-2xl font-semibold text-gray-800">{formatDate(fudgeExpiry)}</div>
-              <div className="text-xs text-gray-500 mt-1">({fudge?.days_out ?? 60} days • rounds to 1st/5th)</div>
-            </div>
-            <div className="rounded-xl p-4 bg-white/40 backdrop-blur border border-white/30">
-              <div className="flex items-center gap-2 mb-1">
-                <div className="w-2 h-2 rounded-full bg-emerald-500" />
-                <span className="text-sm text-gray-600">Rice Crispy Treats</span>
-              </div>
-              <div className="text-2xl font-semibold text-gray-800">{formatDate(rctExpiry)}</div>
-              <div className="text-xs text-gray-500 mt-1">({rct?.days_out ?? 75} days • rounds to 1st/5th)</div>
-            </div>
+          {/* Autosave tracker */}
+          <div className="px-3 py-2 rounded-lg bg-white/40 border border-white/40 text-xs text-gray-700">
+            {autoSaving ? 'Auto-saving…' : manualSaveDirty ? 'Unsaved edits' : 'All changes saved'}
           </div>
-          <p className="text-xs text-gray-500 mt-3">
-            Rule: add days, then snap forward to the 1st or 5th (whichever is the next anchor date).
-          </p>
-        </div>
 
-        {/* Live PDF Preview */}
-        <div className="glass-card rounded-2xl p-6">
-          <h3 className="font-quicksand text-lg font-bold text-gray-800 mb-2">Label Preview</h3>
-          {!pdfPreview ? (
-            <div className="h-56 rounded-xl bg-white/30 border border-white/40 flex items-center justify-center text-gray-500">
-              Select a PDF to preview
-            </div>
-          ) : (
-            <div className="h-56 rounded-xl overflow-hidden border border-white/40">
-              <iframe title={pdfPreview.name} src={pdfPreview.signedUrl} className="w-full h-full bg-white" />
-            </div>
-          )}
-          {pdfPreview && (
-            <div className="flex items-center gap-2 mt-3">
-              <button className="px-3 py-2 rounded-lg hover:bg-white/10 transition flex items-center gap-2" onClick={() => openFile(pdfPreview)}>
-                <Eye className="w-4 h-4" />
-                Open
-              </button>
-              <button className="px-3 py-2 rounded-lg hover:bg-white/10 transition flex items-center gap-2" onClick={() => printFile(pdfPreview)}>
-                <Printer className="w-4 h-4" />
-                Print
-              </button>
-            </div>
-          )}
+          {/* Recently deleted */}
+          <button
+            className="px-3 py-2 rounded-lg hover:bg-white/10 transition flex items-center gap-2 text-gray-700"
+            onClick={openTrash}
+            title="Recently deleted"
+          >
+            <Trash2 className="w-4 h-4" />
+            Trash
+          </button>
         </div>
       </div>
 
-      {/* New Product form */}
+      {/* Updater feedback (minimal) */}
       <AnimatePresence>
-        {showForm && (
-          <motion.div initial={{ opacity: 0, y: -12 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -12 }} className="glass-card rounded-2xl p-6">
-            <h3 className="font-quicksand text-lg font-bold text-gray-800 mb-4">Add Product</h3>
-            <div className="grid sm:grid-cols-3 gap-4">
-              <div className="sm:col-span-2">
-                <label className="block text-sm font-medium text-gray-600 mb-2">Name</label>
-                <input
-                  type="text"
-                  value={productForm.name}
-                  onChange={(e) => setProductForm((s) => ({ ...s, name: e.target.value }))}
-                  className="w-full glass-input rounded-lg px-4 py-3 text-gray-800 placeholder-blue-300 focus:outline-none"
-                  placeholder="e.g., Caramallow Bars"
-                  required
-                />
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-gray-600 mb-2">Days Out</label>
-                <input
-                  type="number"
-                  min={1}
-                  value={productForm.days_out}
-                  onChange={(e) => setProductForm((s) => ({ ...s, days_out: Number(e.target.value || 1) }))}
-                  className="w-full glass-input rounded-lg px-4 py-3 text-gray-800 placeholder-blue-300 focus:outline-none"
-                  required
-                />
-              </div>
-            </div>
-            <div className="flex gap-3 mt-4">
-              <motion.button
-                onClick={createProduct}
-                className="glass-button px-6 py-3 rounded-lg text-gray-800 font-quicksand font-medium flex items-center gap-2"
-                whileHover={{ scale: 1.05 }}
-                whileTap={{ scale: 0.95 }}
-              >
-                <Plus className="w-5 h-5" />
-                Create Product
-              </motion.button>
-              <motion.button
-                type="button"
-                onClick={() => setShowForm(false)}
-                className="px-6 py-3 rounded-lg text-gray-600 hover:bg-white/5 transition-all"
-                whileHover={{ scale: 1.05 }}
-                whileTap={{ scale: 0.95 }}
-              >
-                Cancel
-              </motion.button>
-            </div>
+        {updaterStatus === 'running' && (
+          <motion.div initial={{ opacity: 0, y: -8 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -8 }} className="p-3 bg-yellow-50 rounded-xl text-yellow-700">
+            Updating…
+          </motion.div>
+        )}
+        {updaterStatus === 'done' && (
+          <motion.div initial={{ opacity: 0, y: -8 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -8 }} className="p-3 bg-green-50 rounded-xl text-green-700">
+            Done
+          </motion.div>
+        )}
+        {updaterStatus === 'error' && (
+          <motion.div initial={{ opacity: 0, y: -8 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -8 }} className="p-3 bg-red-50 rounded-xl text-red-700">
+            Error
           </motion.div>
         )}
       </AnimatePresence>
 
-      {/* Main Drive-like area */}
-      <div className="grid lg:grid-cols-[280px_1fr_400px] gap-4">
-        {/* Sidebar: Products & Folders */}
-        <div className="glass-card rounded-2xl p-4">
-          <div className="flex items-center justify-between mb-3">
-            <h4 className="font-quicksand font-bold text-gray-800">Products</h4>
-            <motion.button
-              onClick={() => setShowForm(!showForm)}
-              className="glass-button px-3 py-2 rounded-lg text-gray-800 font-quicksand font-medium flex items-center gap-2"
-              whileHover={{ scale: 1.05 }}
-              whileTap={{ scale: 0.95 }}
+      {/* ===== Content ===== */}
+      {!selectedProduct && (
+        <>
+          {/* Actions over grid */}
+          <div className="flex items-center gap-2">
+            <button
+              onClick={addFolder}
+              className="glass-button px-4 py-2 rounded-lg text-gray-800 font-quicksand font-medium flex items-center gap-2"
+              title="Add Folder"
             >
               <Plus className="w-4 h-4" />
-              New
-            </motion.button>
+              Add Folder
+            </button>
+            <button
+              onClick={importFolder}
+              className="glass-button px-4 py-2 rounded-lg text-gray-800 font-quicksand font-medium flex items-center gap-2"
+              title="Import Folder"
+            >
+              <UploadCloud className="w-4 h-4" />
+              Import Folder
+            </button>
           </div>
 
-          <div className="space-y-1">
+          {/* Grid of product folder cards */}
+          <div className="grid sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
             {products.map((p) => {
               const pending = editBuffer[p.id];
               const name = pending?.name ?? p.name;
               const days = pending?.days_out ?? p.days_out;
-
+              const expiry = computeExpiry(days);
               return (
-                <div key={p.id} className={`rounded-xl p-3 transition ${selectedProductId === p.id ? 'bg-white/50' : 'hover:bg-white/30'}`}>
-                  <div className="flex items-center justify-between gap-2">
-                    <button className="flex items-center gap-2 text-left w-full" onClick={() => setSelectedProductId(p.id)} title={p.folder_path}>
-                      <Folder className="w-4 h-4 text-indigo-500" />
-                      <span className="font-medium text-gray-800 truncate">{name}</span>
-                    </button>
-                    <button className="p-2 rounded hover:bg-white/40" onClick={() => deleteProduct(p.id)} title="Delete product (keeps storage files)">
-                      <Trash2 className="w-4 h-4 text-rose-500" />
-                    </button>
+                <motion.div
+                  key={p.id}
+                  initial={{ opacity: 0, y: 6 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  className="rounded-2xl p-4 bg-white/50 border border-white/40 hover:shadow-xl transition cursor-pointer"
+                  onClick={() => setSelectedProductId(p.id)}
+                >
+                  <div className="flex items-start justify-between">
+                    <div className="flex items-center gap-2">
+                      <Folder className="w-5 h-5 text-indigo-500" />
+                      <div className="font-semibold text-gray-800">{name}</div>
+                    </div>
+                    <div className="flex items-center gap-1">
+                      <button
+                        className="p-2 rounded hover:bg-white/60"
+                        title="Edit"
+                        onClick={(e) => { e.stopPropagation(); /* toggle quick edit: no modal, inline under card */ const v = (document.getElementById(`edit-${p.id}`) as HTMLDivElement); if (v) v.classList.toggle('hidden'); }}
+                      >
+                        <Pencil className="w-4 h-4 text-gray-600" />
+                      </button>
+                      <button
+                        className="p-2 rounded hover:bg-white/60"
+                        title="Delete Folder"
+                        onClick={(e) => { e.stopPropagation(); softDeleteProduct(p.id); }}
+                      >
+                        <Trash2 className="w-4 h-4 text-rose-600" />
+                      </button>
+                    </div>
                   </div>
 
-                  {/* Editable settings for selected product */}
-                  {selectedProductId === p.id && (
-                    <div className="mt-3 space-y-2">
-                      <div>
-                        <label className="block text-xs text-gray-500 mb-1">Display Name</label>
-                        <input
-                          value={name}
-                          onChange={(e) => bufferValue(p.id, 'name', e.target.value)}
-                          className="w-full glass-input rounded-lg px-3 py-2 text-sm"
-                        />
-                      </div>
-                      <div>
-                        <label className="block text-xs text-gray-500 mb-1">Days Out</label>
-                        <input
-                          type="number"
-                          min={1}
-                          value={days}
-                          onChange={(e) => bufferValue(p.id, 'days_out', e.target.value)}
-                          className="w-full glass-input rounded-lg px-3 py-2 text-sm"
-                        />
-                      </div>
-                      <div className="flex items-center gap-2">
-                        <button
-                          className="px-3 py-2 rounded-lg hover:bg-white/10 transition flex items-center gap-2"
-                          onClick={() => manualSave(p.id)}
-                          disabled={!manualSaveDirty && !autoSaving}
-                          title="Save settings"
-                        >
-                          <Save className="w-4 h-4" />
-                          {autoSaving ? 'Saving…' : 'Save'}
-                        </button>
-                        <span className="text-xs text-gray-500">{p.folder_path}</span>
-                      </div>
+                  <div className="mt-3 grid grid-cols-2 gap-2 text-sm">
+                    <div className="rounded-lg px-3 py-2 bg-white/70">
+                      <div className="text-[11px] text-gray-500">Expires</div>
+                      <div className="font-medium text-gray-800">{formatDate(expiry)}</div>
                     </div>
-                  )}
-                </div>
+                    <div className="rounded-lg px-3 py-2 bg-white/70">
+                      <div className="text-[11px] text-gray-500">Next Update</div>
+                      <div className="font-medium text-gray-800">{formatDate(nextUpdateAt)}</div>
+                    </div>
+                  </div>
+
+                  {/* Inline quick edit (hidden by default) */}
+                  <div id={`edit-${p.id}`} className="hidden mt-3 space-y-2" onClick={(e) => e.stopPropagation()}>
+                    <input
+                      value={name}
+                      onChange={(e) => bufferValue(p.id, 'name', e.target.value)}
+                      className="w-full glass-input rounded-lg px-3 py-2 text-sm"
+                      placeholder="Name"
+                    />
+                    <input
+                      type="number"
+                      min={1}
+                      value={days}
+                      onChange={(e) => bufferValue(p.id, 'days_out', e.target.value)}
+                      className="w-full glass-input rounded-lg px-3 py-2 text-sm"
+                      placeholder="Days Out"
+                    />
+                  </div>
+                </motion.div>
               );
             })}
           </div>
+        </>
+      )}
 
-          {/* Archive access hint */}
-          <div className="mt-4 p-3 rounded-xl bg-white/30 border border-white/40 text-xs text-gray-600 flex items-start gap-2">
-            <FolderArchive className="w-4 h-4 mt-0.5" />
-            Archive folders are visible only to admins.
-          </div>
-        </div>
-
-        {/* Files area */}
-        <div className="glass-card rounded-2xl p-4">
-          <div className="flex items-center justify-between mb-3">
-            <h4 className="font-quicksand font-bold text-gray-800">{selectedProduct ? `${selectedProduct.name} Files` : 'Select a product'}</h4>
+      {/* ===== Folder View ===== */}
+      {selectedProduct && (
+        <div className="space-y-4">
+          {/* Folder header */}
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <button
+                className="p-2 rounded hover:bg-white/50"
+                title="Back"
+                onClick={() => setSelectedProductId(null)}
+              >
+                <ChevronLeft className="w-5 h-5 text-gray-700" />
+              </button>
+              <div className="flex items-center gap-2">
+                <Folder className="w-5 h-5 text-indigo-500" />
+                <div className="font-semibold text-gray-800">
+                  {products.find((p) => p.id === selectedProductId)?.name}
+                </div>
+              </div>
+            </div>
 
             <div className="flex items-center gap-2">
               <input
@@ -631,98 +771,175 @@ export default function LabelsTab() {
                 onChange={(e) => handleUpload(e.target.files)}
                 accept="application/pdf,image/*"
               />
-              <button onClick={() => uploaderRef.current?.click()} className="glass-button px-4 py-2 rounded-lg text-gray-800 font-quicksand font-medium flex items-center gap-2">
+              <button
+                onClick={() => uploaderRef.current?.click()}
+                className="glass-button px-3 py-2 rounded-lg text-gray-800 font-quicksand font-medium flex items-center gap-2"
+                title="Add files"
+              >
                 <UploadCloud className="w-4 h-4" />
-                Upload
+                Add Files
+              </button>
+              <button
+                onClick={() => uploaderRef.current?.click()}
+                className="glass-button px-3 py-2 rounded-lg text-gray-800 font-quicksand font-medium flex items-center gap-2"
+                title="Import files"
+              >
+                <UploadCloud className="w-4 h-4" />
+                Import Files
               </button>
             </div>
           </div>
 
-          <div
-            className="rounded-2xl border border-dashed border-white/50 bg-white/30 p-6 text-gray-500 text-sm flex items-center justify-center mb-4"
-            onDrop={onDrop}
-            onDragOver={onDragOver}
-          >
-            Drag & drop files here to upload
-          </div>
+          {/* Archive subfolder tile */}
+          <div className="grid md:grid-cols-3 gap-3">
+            {/* Archive card */}
+            <div
+              className={`rounded-2xl p-4 bg-white/50 border border-white/40 ${!isAdmin ? 'opacity-90' : 'hover:shadow-lg'} transition`}
+            >
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <FolderArchive className="w-5 h-5 text-gray-700" />
+                  <div className="font-medium text-gray-800">archive</div>
+                </div>
+                {!isAdmin && <Lock className="w-4 h-4 text-gray-500" title="Admin only" />}
+              </div>
+              <div className="text-[11px] text-gray-500 mt-2">{isAdmin ? 'Visible' : 'Locked'}</div>
+            </div>
 
-          <div className="grid sm:grid-cols-2 xl:grid-cols-3 gap-3">
-            {selectedProduct ? (
-              files
-                .filter((f) => (f.isArchive ? isAdmin : true))
-                .map((f) => (
-                  <div key={f.path} className="rounded-xl p-4 bg-white/40 backdrop-blur border border-white/30">
-                    <div className="flex items-start justify-between gap-2">
-                      <div className="flex items-center gap-2">
-                        <FileText className="w-4 h-4 text-gray-600" />
-                        <div>
-                          <div className="font-medium text-gray-800 truncate max-w-[180px]">{f.name}</div>
-                          <div className="text-[11px] text-gray-500">{f.isArchive ? `${ARCHIVE_DIR}/` : ''}{selectedProduct.folder_path}</div>
-                        </div>
-                      </div>
-                      {f.isArchive ? <div className="text-[10px] px-2 py-1 rounded bg-gray-900/10 text-gray-600">ARCHIVE</div> : null}
+            {/* Files */}
+            {files
+              .filter((f) => (f.isArchive ? isAdmin : true))
+              .map((f) => (
+                <div key={f.path} className="rounded-2xl p-4 bg-white/50 border border-white/40 hover:shadow-lg transition">
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="flex items-center gap-2">
+                      <FileText className="w-4 h-4 text-gray-600" />
+                      <div className="font-medium text-gray-800 truncate max-w-[200px]">{f.name}</div>
                     </div>
+                    {f.isArchive ? (
+                      <div className="text-[10px] px-2 py-1 rounded bg-gray-900/10 text-gray-600">ARCHIVE</div>
+                    ) : null}
+                  </div>
 
-                    <div className="flex items-center gap-2 mt-3">
-                      <button className="px-3 py-2 rounded-lg hover:bg-white/10 transition text-sm flex items-center gap-2" onClick={() => openFile(f)}>
-                        <Eye className="w-4 h-4" />
-                        Open
-                      </button>
-                      <button className="px-3 py-2 rounded-lg hover:bg-white/10 transition text-sm flex items-center gap-2" onClick={() => printFile(f)}>
-                        <Printer className="w-4 h-4" />
-                        Print
-                      </button>
-                      {!f.isArchive && (
-                        <button className="px-3 py-2 rounded-lg hover:bg-white/10 transition text-sm flex items-center gap-2" onClick={() => moveToArchive(f)} title="Move to archive">
+                  <div className="mt-3 flex items-center gap-2">
+                    <button className="px-3 py-2 rounded-lg hover:bg-white/10 transition text-sm flex items-center gap-2" onClick={() => openFile(f)} title="Open">
+                      <Eye className="w-4 h-4" />
+                      Open
+                    </button>
+                    <button className="px-3 py-2 rounded-lg hover:bg-white/10 transition text-sm flex items-center gap-2" onClick={() => printFile(f)} title="Print">
+                      <Printer className="w-4 h-4" />
+                      Print
+                    </button>
+                    {!f.isArchive && (
+                      <>
+                        <button className="px-3 py-2 rounded-lg hover:bg-white/10 transition text-sm flex items-center gap-2" onClick={() => moveToArchive(f)} title="Archive">
                           <MoveRight className="w-4 h-4" />
                           Archive
                         </button>
-                      )}
-                      {isAdmin && (
-                        <button className="px-3 py-2 rounded-lg hover:bg-white/10 transition text-sm flex items-center gap-2" onClick={() => deleteFile(f)} title="Delete file">
+                        <button className="px-3 py-2 rounded-lg hover:bg-white/10 transition text-sm flex items-center gap-2" onClick={() => softDeleteFile(f)} title="Delete">
                           <Trash2 className="w-4 h-4 text-rose-600" />
                           Delete
                         </button>
-                      )}
-                    </div>
+                      </>
+                    )}
                   </div>
-                ))
-            ) : (
-              <div className="text-gray-500">Choose a product to view files.</div>
-            )}
+                </div>
+              ))}
           </div>
         </div>
+      )}
 
-        {/* Right panel: Product snapshot & rules */}
-        <div className="glass-card rounded-2xl p-4">
-          <h4 className="font-quicksand font-bold text-gray-800 mb-3">Product Snapshot</h4>
-          {!selectedProduct ? (
-            <div className="text-gray-500 text-sm">Select a product to view details.</div>
-          ) : (
-            <div className="space-y-3">
-              <div className="rounded-xl p-4 bg-white/40 border border-white/30">
-                <div className="text-sm text-gray-600">Product</div>
-                <div className="text-lg font-semibold text-gray-800">{selectedProduct.name}</div>
-                <div className="text-xs text-gray-500 mt-1">Folder: {selectedProduct.folder_path}</div>
+      {/* ===== Preview Modal (blur background) ===== */}
+      <AnimatePresence>
+        {previewOpen && previewFile && (
+          <motion.div
+            className="fixed inset-0 z-50 flex items-center justify-center"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+          >
+            {/* Backdrop */}
+            <div className="absolute inset-0 bg-black/30 backdrop-blur-sm" onClick={() => { setPreviewOpen(false); setPreviewFile(null); }} />
+
+            {/* Modal */}
+            <motion.div
+              initial={{ scale: 0.95, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.95, opacity: 0 }}
+              className="relative z-10 w-[90vw] h-[80vh] rounded-2xl overflow-hidden bg-white shadow-2xl border border-gray-200"
+            >
+              <div className="h-full w-full">
+                <iframe title={previewFile.name} src={previewFile.signedUrl} className="w-full h-full" />
               </div>
-              <div className="rounded-xl p-4 bg-white/40 border border-white/30">
-                <div className="text-sm text-gray-600">Days Out</div>
-                <div className="text-2xl font-semibold text-gray-800">{selectedProduct.days_out}</div>
-                <div className="text-xs text-gray-500 mt-1">Next Expiration Date: {formatDate(computeExpiry(selectedProduct.days_out))}</div>
+              <div className="absolute top-2 right-2 flex items-center gap-2">
+                <button
+                  className="px-3 py-2 rounded-lg bg-white/80 hover:bg-white text-sm shadow"
+                  onClick={() => { if (previewFile) printFile(previewFile); }}
+                >
+                  Print
+                </button>
+                <button
+                  className="px-3 py-2 rounded-lg bg-white/80 hover:bg-white text-sm shadow"
+                  onClick={() => { setPreviewOpen(false); setPreviewFile(null); }}
+                >
+                  Close
+                </button>
               </div>
-              <div className="rounded-xl p-4 bg-white/40 border border-white/30">
-                <div className="text-sm text-gray-600">Expiration Rounding</div>
-                <div className="text-xs text-gray-700">
-                  Add days, then snap to the next available anchor date: 1st or 5th. If after the 5th, roll to the 1st of next month.
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Trash Modal */}
+      <AnimatePresence>
+        {trashOpen && (
+          <motion.div
+            className="fixed inset-0 z-50 flex items-center justify-center"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+          >
+            <div className="absolute inset-0 bg-black/30 backdrop-blur-sm" onClick={() => setTrashOpen(false)} />
+            <motion.div
+              initial={{ scale: 0.95, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.95, opacity: 0 }}
+              className="relative z-10 w-[90vw] max-w-3xl rounded-2xl bg-white shadow-2xl border border-gray-200 p-4"
+            >
+              <div className="flex items-center justify-between mb-3">
+                <div className="font-semibold text-gray-800 flex items-center gap-2">
+                  <Trash2 className="w-4 h-4" /> Recently Deleted (24h)
                 </div>
+                <button className="px-3 py-2 rounded-lg bg-gray-100 hover:bg-gray-200 text-sm" onClick={() => setTrashOpen(false)}>
+                  Close
+                </button>
               </div>
-            </div>
-          )}
-        </div>
-      </div>
 
-      {/* Footer note */}
-      <div className="text-xs text-gray-500">Changes auto-save after 1s of inactivity {autoSaving ? '• Saving…' : manualSaveDirty ? '• Unsaved edits' : ''}.</div>
+              <div className="grid sm:grid-cols-2 gap-3">
+                {recentlyDeleted.length === 0 ? (
+                  <div className="text-gray-500 text-sm">Empty</div>
+                ) : (
+                  recentlyDeleted.map((it) => (
+                    <div key={it.id} className="rounded-xl p-4 bg-white/60 border border-gray-200">
+                      <div className="text-sm text-gray-700">
+                        {it.kind === 'file' ? 'File' : 'Folder'}
+                      </div>
+                      <div className="text-xs text-gray-500 truncate mt-1">
+                        {it.kind === 'file' ? (it.original_path || '') : (it.product_snapshot?.folder_path || '')}
+                      </div>
+                      <div className="mt-3 flex items-center gap-2">
+                        <button className="px-3 py-2 rounded-lg bg-emerald-50 hover:bg-emerald-100 text-emerald-700 text-sm" onClick={() => restoreItem(it)}>
+                          Restore
+                        </button>
+                      </div>
+                    </div>
+                  ))
+                )}
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
     </div>
   );
 }
