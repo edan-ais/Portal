@@ -1,5 +1,20 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Tag, Plus, Trash2, Folder, FolderArchive, UploadCloud, FileText, MoveRight, ShieldCheck, RefreshCcw, Eye, Printer, Save } from 'lucide-react';
+import {
+  Tag,
+  Plus,
+  Trash2,
+  Folder,
+  FolderArchive,
+  UploadCloud,
+  FileText,
+  MoveRight,
+  ShieldCheck,
+  RefreshCcw,
+  Eye,
+  Printer,
+  Save,
+  PlayCircle
+} from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { supabase } from '../../lib/supabase';
 
@@ -10,19 +25,18 @@ interface Product {
   name: string;
   slug: string;
   days_out: number;
-  folder_path: string; // e.g., "fudge/"
+  folder_path: string;   
   created_at?: string;
 }
 
 interface FileItem {
-  name: string;         // filename.pdf
-  path: string;         // productSlug/filename.pdf
-  id?: string;          // storage id (not always present)
-  signedUrl?: string;   // for viewing/printing
+  name: string;          
+  path: string;          
+  signedUrl?: string;     
+  isArchive?: boolean;
+  mimeType?: string;
   created_at?: string;
   size?: number;
-  mimeType?: string;
-  isArchive?: boolean;
 }
 
 interface Profile {
@@ -31,22 +45,12 @@ interface Profile {
 }
 
 const LABELS_BUCKET = 'labels';
+const ARCHIVE_DIR = 'archive';
 
 function slugify(input: string) {
-  return input
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/(^-|-$)+/g, '');
+  return input.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)+/g, '');
 }
 
-/**
- * Expiration Rule:
- * - target = today + daysOut
- * - Snap to the next anchor date at/after target: 1st or 5th of that month.
- *   If target day <= 1 -> snap to the 1st
- *   else if target day <= 5 -> snap to the 5th
- *   else -> snap to the 1st of the next month
- */
 function computeExpiry(daysOut: number, now = new Date()) {
   const target = new Date(now);
   target.setDate(target.getDate() + daysOut);
@@ -57,7 +61,6 @@ function computeExpiry(daysOut: number, now = new Date()) {
 
   if (d <= 1) return new Date(y, m, 1);
   if (d <= 5) return new Date(y, m, 5);
-  // first of next month
   return new Date(y, m + 1, 1);
 }
 
@@ -67,36 +70,32 @@ function formatDate(d?: Date) {
 }
 
 export default function LabelsTab() {
-  // --- Top-level state ---
   const [loading, setLoading] = useState(true);
   const [heartbeatOk, setHeartbeatOk] = useState<boolean | null>(null);
   const [heartbeatAt, setHeartbeatAt] = useState<Date | null>(null);
   const [products, setProducts] = useState<Product[]>([]);
   const [selectedProductId, setSelectedProductId] = useState<UUID | null>(null);
   const [files, setFiles] = useState<FileItem[]>([]);
-  const [showForm, setShowForm] = useState(false);
-  const [isAdmin, setIsAdmin] = useState(false);
   const [pdfPreview, setPdfPreview] = useState<FileItem | null>(null);
+
+  const [showForm, setShowForm] = useState(false);
+  const [productForm, setProductForm] = useState<{ name: string; days_out: number }>({ name: '', days_out: 60 });
+
+  const [editBuffer, setEditBuffer] = useState<Record<UUID, { name: string; days_out: number }>>({});
   const [autoSaving, setAutoSaving] = useState(false);
   const [manualSaveDirty, setManualSaveDirty] = useState(false);
 
-  // New product form
-  const [productForm, setProductForm] = useState<{ name: string; days_out: number }>({
-    name: '',
-    days_out: 60,
-  });
-
-  // Editable product settings (auto-save)
-  const [editBuffer, setEditBuffer] = useState<Record<UUID, { name: string; days_out: number }>>({});
+  const [isAdmin, setIsAdmin] = useState(false);
+  const [updaterStatus, setUpdaterStatus] = useState<'idle' | 'running' | 'done' | 'error'>('idle');
+  const [updaterSummary, setUpdaterSummary] = useState<any[]>([]);
 
   const uploaderRef = useRef<HTMLInputElement | null>(null);
+  const debounceTimers = useRef<Record<UUID, any>>({});
 
-  // --- Effects: Auth/Admin, bootstrap products, heartbeat, selection ---
   useEffect(() => {
     (async () => {
       setLoading(true);
-
-      // Admin check
+     
       const { data: sessionRes } = await supabase.auth.getSession();
       const user = sessionRes?.session?.user;
       let admin = false;
@@ -112,119 +111,126 @@ export default function LabelsTab() {
       }
       setIsAdmin(admin);
 
-      // Load products; seed if empty
-      const { data: prod } = await supabase
-        .from('products')
-        .select('*')
-        .order('created_at', { ascending: true });
-      let list = prod ?? [];
-
+      const { data: prod } = await supabase.from('products').select('*').order('created_at', { ascending: true });
+      let list: Product[] = prod || [];
       if (!list || list.length === 0) {
-        // seed Fudge (60) and Rice Crispy Treats (75)
-        const seed: Partial<Product>[] = [
-          {
-            name: 'Fudge',
-            slug: 'fudge',
-            days_out: 60,
-            folder_path: 'fudge/',
-          },
-          {
-            name: 'Rice Crispy Treats',
-            slug: 'rice-crispy-treats',
-            days_out: 75,
-            folder_path: 'rice-crispy-treats/',
-          },
+        const seed = [
+          { name: 'Fudge', slug: 'fudge', days_out: 60, folder_path: 'fudge/' },
+          { name: 'Rice Crispy Treats', slug: 'rice-crispy-treats', days_out: 75, folder_path: 'rice-crispy-treats/' }
         ];
-        const { data: inserted } = await supabase
-          .from('products')
-          .insert(seed)
-          .select('*');
-        list = inserted ?? [];
+        const { data: inserted } = await supabase.from('products').insert(seed).select('*');
+        list = inserted || [];
       }
-
       setProducts(list);
-      if (!selectedProductId && list.length) setSelectedProductId(list[0].id);
+      if (list.length && !selectedProductId) setSelectedProductId(list[0].id);
 
-      // initial heartbeat + schedule
       await pingHeartbeat();
       const iv = setInterval(pingHeartbeat, 30_000);
+
       setLoading(false);
       return () => clearInterval(iv);
     })();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+  
   }, []);
 
-  // load files when product changes
   useEffect(() => {
-    if (!selectedProductId) return;
-    const product = products.find((p) => p.id === selectedProductId);
-    if (product) {
-      void ensureArchivePlaceholder(product);
-      void loadFiles(product);
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    (async () => {
+      if (!selectedProductId) return;
+      const p = products.find((x) => x.id === selectedProductId);
+      if (!p) return;
+      await ensureProductPlaceholders(p);
+      await loadFiles(p);
+      setPdfPreview(null);
+    })();
+ 
   }, [selectedProductId, products.length]);
 
-  // --- Heartbeat ---
   const pingHeartbeat = async () => {
     try {
-      // lightweight ping: count products
-      const { data, error } = await supabase.from('products').select('id', { count: 'exact', head: true });
-      if (error) throw error;
-      setHeartbeatOk(true);
+      const url = `${import.meta.env.VITE_LABEL_UPDATER_URL}/`;
+      const res = await fetch(url, { method: 'GET' });
+      setHeartbeatOk(res.ok);
       setHeartbeatAt(new Date());
     } catch {
       setHeartbeatOk(false);
     }
   };
 
-  // --- Helpers: Storage/Folders ---
-  async function ensureArchivePlaceholder(product: Product) {
-    // Supabase Storage is flat; "folders" exist when a file path includes them.
-    // We'll ensure an archive/ path exists by placing a tiny .keep if needed.
-    const archivePath = `${product.folder_path}archive/.keep`;
-    const { data: listed } = await supabase.storage.from(LABELS_BUCKET).list(`${product.folder_path}archive`, {
-      limit: 1,
-    });
-    if (!listed || listed.length === 0) {
-      await supabase.storage.from(LABELS_BUCKET).upload(archivePath, new Blob([''], { type: 'text/plain' }), {
-        upsert: true,
+  const triggerUpdater = async () => {
+    try {
+      setUpdaterStatus('running');
+      const url = `${import.meta.env.VITE_LABEL_UPDATER_URL}/api/run`;
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${import.meta.env.VITE_LABEL_UPDATER_SECRET}` }
       });
+      if (!res.ok) throw new Error('failed to trigger updater');
+      const data = await res.json();
+      setUpdaterSummary(data.summary || []);
+      setUpdaterStatus('done');
+     
+      const p = products.find((x) => x.id === selectedProductId);
+      if (p) await loadFiles(p);
+    } catch (e) {
+      console.error(e);
+      setUpdaterStatus('error');
     }
+  };
+
+  async function ensureProductPlaceholders(product: Product) {
+    
+    const keepMain = `${product.folder_path}.keep`;
+    const keepArchive = `${product.folder_path}${ARCHIVE_DIR}/.keep`;
+
+    try {
+      
+      const listMain = await supabase.storage.from(LABELS_BUCKET).list(product.folder_path, { limit: 1 });
+      if (!listMain.data || listMain.data.length === 0) {
+        await supabase.storage
+          .from(LABELS_BUCKET)
+          .upload(keepMain, new Blob([''], { type: 'text/plain' }), { upsert: true });
+      }
+    } catch (_) {}
+
+    try {
+     
+      const listArc = await supabase.storage.from(LABELS_BUCKET).list(`${product.folder_path}${ARCHIVE_DIR}`, { limit: 1 });
+      if (!listArc.data || listArc.data.length === 0) {
+        await supabase.storage
+          .from(LABELS_BUCKET)
+          .upload(keepArchive, new Blob([''], { type: 'text/plain' }), { upsert: true });
+      }
+    } catch (_) {}
   }
 
   async function loadFiles(product: Product) {
-    // List root (product folder)
-    const [root, arch] = await Promise.all([
-      supabase.storage.from(LABELS_BUCKET).list(product.folder_path, { limit: 1000 }),
-      supabase.storage.from(LABELS_BUCKET).list(`${product.folder_path}archive`, { limit: 1000 }),
-    ]);
+    const root = await supabase.storage.from(LABELS_BUCKET).list(product.folder_path, { limit: 1000 });
+    const arch = await supabase.storage.from(LABELS_BUCKET).list(`${product.folder_path}${ARCHIVE_DIR}`, { limit: 1000 });
 
     const toItems = (entries: any[], isArchive = false): FileItem[] =>
       (entries || [])
-        .filter((e) => !e.name.endsWith('.keep'))
+        .filter((e) => e && !e.name.endsWith('.keep'))
         .map((e) => ({
           name: e.name,
-          path: `${isArchive ? product.folder_path + 'archive/' : product.folder_path}${e.name}`,
+          path: `${isArchive ? product.folder_path + ARCHIVE_DIR + '/' : product.folder_path}${e.name}`,
           created_at: e.created_at,
           size: e.metadata?.size,
           mimeType: e.metadata?.mimetype,
-          isArchive,
+          isArchive
         }));
 
-    setFiles([...(toItems(root?.data || [], false)), ...(toItems(arch?.data || [], true))]);
-    setPdfPreview(null);
+    setFiles([...(toItems(root.data || [], false)), ...(toItems(arch.data || [], true))]);
   }
 
   async function signUrl(path: string) {
-    const { data } = await supabase.storage.from(LABELS_BUCKET).createSignedUrl(path, 60 * 10);
+    const { data, error } = await supabase.storage.from(LABELS_BUCKET).createSignedUrl(path, 60 * 10);
+    if (error) return null;
     return data?.signedUrl || null;
   }
 
   async function openFile(file: FileItem) {
     const url = await signUrl(file.path);
     if (!url) return;
-    // If it's a PDF, load into preview; otherwise, open new tab
     if ((file.mimeType && file.mimeType.includes('pdf')) || file.name.toLowerCase().endsWith('.pdf')) {
       setPdfPreview({ ...file, signedUrl: url });
     } else {
@@ -235,51 +241,48 @@ export default function LabelsTab() {
   async function printFile(file: FileItem) {
     const url = await signUrl(file.path);
     if (!url) return;
-    // best effort: open the pdf in a new tab; the user can print from there
     window.open(url, '_blank', 'noopener,noreferrer');
   }
 
   async function deleteFile(file: FileItem) {
     await supabase.storage.from(LABELS_BUCKET).remove([file.path]);
-    const product = products.find((p) => p.id === selectedProductId);
-    if (product) await loadFiles(product);
+    const p = products.find((x) => x.id === selectedProductId);
+    if (p) await loadFiles(p);
+    if (pdfPreview && pdfPreview.path === file.path) setPdfPreview(null);
   }
 
   async function moveToArchive(file: FileItem) {
-    const product = products.find((p) => p.id === selectedProductId);
-    if (!product) return;
-    const dest = `${product.folder_path}archive/${file.name}`;
-    // storage.move currently available in Supabase JS:
+    if (file.isArchive) return;
+    const p = products.find((x) => x.id === selectedProductId);
+    if (!p) return;
+    const dest = `${p.folder_path}${ARCHIVE_DIR}/${file.name}`;
     await supabase.storage.from(LABELS_BUCKET).move(file.path, dest);
-    await loadFiles(product);
+    await loadFiles(p);
+    if (pdfPreview && pdfPreview.path === file.path) setPdfPreview(null);
   }
 
-  // --- Upload ---
   async function handleUpload(filesToUpload: FileList | null) {
     if (!filesToUpload || !selectedProductId) return;
-    const product = products.find((p) => p.id === selectedProductId);
-    if (!product) return;
+    const p = products.find((x) => x.id === selectedProductId);
+    if (!p) return;
 
     for (const f of Array.from(filesToUpload)) {
-      const dest = `${product.folder_path}${f.name}`;
+      const dest = `${p.folder_path}${f.name}`;
       await supabase.storage.from(LABELS_BUCKET).upload(dest, f, { upsert: true, contentType: f.type });
     }
-    await loadFiles(product);
+    await loadFiles(p);
   }
 
-  // Drag & drop
   function onDrop(e: React.DragEvent<HTMLDivElement>) {
     e.preventDefault();
     e.stopPropagation();
     handleUpload(e.dataTransfer.files);
   }
-
   function onDragOver(e: React.DragEvent<HTMLDivElement>) {
     e.preventDefault();
     e.stopPropagation();
   }
 
-  // --- Product CRUD / edits ---
   async function createProduct() {
     const name = productForm.name.trim();
     if (!name) return;
@@ -294,7 +297,7 @@ export default function LabelsTab() {
     if (inserted) {
       setProducts((p) => [...p, inserted]);
       setSelectedProductId(inserted.id);
-      await ensureArchivePlaceholder(inserted);
+      await ensureProductPlaceholders(inserted);
       await loadFiles(inserted);
       setShowForm(false);
       setProductForm({ name: '', days_out: 60 });
@@ -305,20 +308,18 @@ export default function LabelsTab() {
     setEditBuffer((prev) => {
       const base = prev[pid] ?? {
         name: products.find((p) => p.id === pid)?.name ?? '',
-        days_out: products.find((p) => p.id === pid)?.days_out ?? 60,
+        days_out: products.find((p) => p.id === pid)?.days_out ?? 60
       };
       const next = {
         ...base,
-        [key]: key === 'days_out' ? Number(value) || 0 : value,
+        [key]: key === 'days_out' ? Number(value) || 0 : value
       };
       return { ...prev, [pid]: next };
     });
     setManualSaveDirty(true);
-    // auto-save debounce
     debounceSave(pid);
   }
 
-  const debounceTimers = useRef<Record<UUID, any>>({});
   function debounceSave(pid: UUID) {
     if (debounceTimers.current[pid]) clearTimeout(debounceTimers.current[pid]);
     debounceTimers.current[pid] = setTimeout(() => autoSave(pid), 1000);
@@ -332,12 +333,7 @@ export default function LabelsTab() {
     const folder_path = `${slug}/`;
     const { data: updated } = await supabase
       .from('products')
-      .update({
-        name: pending.name,
-        days_out: Math.max(1, Math.floor(pending.days_out || 1)),
-        slug,
-        folder_path,
-      })
+      .update({ name: pending.name, days_out: Math.max(1, Math.floor(pending.days_out || 1)), slug, folder_path })
       .eq('id', pid)
       .select('*')
       .single<Product>();
@@ -353,14 +349,13 @@ export default function LabelsTab() {
   }
 
   async function deleteProduct(pid: UUID) {
-    // Only delete the DB record; do not nuke storage by default.
+ 
     await supabase.from('products').delete().eq('id', pid);
     const next = products.filter((p) => p.id !== pid);
     setProducts(next);
     if (selectedProductId === pid) setSelectedProductId(next[0]?.id ?? null);
   }
 
-  // --- Computed views ---
   const selectedProduct = useMemo(
     () => products.find((p) => p.id === selectedProductId) || null,
     [products, selectedProductId]
@@ -375,10 +370,9 @@ export default function LabelsTab() {
   const fudgeExpiry = fudge ? computeExpiry(fudge.days_out) : null;
   const rctExpiry = rct ? computeExpiry(rct.days_out) : null;
 
-  // --- UI ---
   return (
     <div className="space-y-6">
-      {/* Header (unchanged per your request) */}
+      {/* Header */}
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-3">
           <Tag className="w-8 h-8 text-gray-500" />
@@ -387,36 +381,54 @@ export default function LabelsTab() {
 
         <div className="flex items-center gap-3">
           {/* System Monitor */}
-          <div className={`px-3 py-2 rounded-lg glass-card flex items-center gap-2 ${heartbeatOk ? 'text-emerald-600' : 'text-rose-600'}`}>
+          <div
+            className={`px-3 py-2 rounded-lg glass-card flex items-center gap-2 ${
+              heartbeatOk ? 'text-emerald-600' : 'text-rose-600'
+            }`}
+          >
             <ShieldCheck className="w-4 h-4" />
             <span className="text-sm font-medium">
               {heartbeatOk === null ? 'Checking…' : heartbeatOk ? 'System Live' : 'Offline'}
               {heartbeatAt ? (
-                <span className="text-gray-500 ml-2">• {heartbeatAt.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
+                <span className="text-gray-500 ml-2">
+                  • {heartbeatAt.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                </span>
               ) : null}
             </span>
-            <button
-              className="ml-2 p-1 rounded hover:bg-white/10 transition"
-              onClick={() => pingHeartbeat()}
-              title="Refresh"
-            >
+            <button className="ml-2 p-1 rounded hover:bg-white/10 transition" onClick={() => pingHeartbeat()} title="Refresh">
               <RefreshCcw className="w-4 h-4" />
             </button>
           </div>
 
           <motion.button
-            onClick={() => setShowForm(!showForm)}
+            onClick={triggerUpdater}
             className="glass-button px-6 py-3 rounded-lg text-gray-800 font-quicksand font-medium flex items-center gap-2"
             whileHover={{ scale: 1.05 }}
             whileTap={{ scale: 0.95 }}
           >
-            <Plus className="w-5 h-5" />
-            New Product
+            <PlayCircle className="w-5 h-5" />
+            Run Label Updater
           </motion.button>
         </div>
       </div>
 
-      {/* Expiration Overview */}
+      {/* Updater status */}
+      {updaterStatus === 'running' && <div className="p-4 bg-yellow-50 rounded-xl text-yellow-700">⏳ Updating labels…</div>}
+      {updaterStatus === 'done' && (
+        <div className="p-4 bg-green-50 rounded-xl text-green-700">
+          <h3 className="font-bold mb-2">✅ Update Complete</h3>
+          <ul className="list-disc ml-5 space-y-1 text-sm">
+            {updaterSummary.map(([name, status, date]) => (
+              <li key={name}>
+                {name}: {status} {date ? `→ ${date}` : ''}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+      {updaterStatus === 'error' && <div className="p-4 bg-red-50 rounded-xl text-red-700">❌ Error running label updater</div>}
+
+      {/* Expiration Overview + Live PDF Preview */}
       <div className="grid md:grid-cols-2 gap-4">
         <div className="glass-card rounded-2xl p-6">
           <h3 className="font-quicksand text-lg font-bold text-gray-800 mb-2">Upcoming Expirations</h3>
@@ -427,7 +439,7 @@ export default function LabelsTab() {
                 <span className="text-sm text-gray-600">Fudge</span>
               </div>
               <div className="text-2xl font-semibold text-gray-800">{formatDate(fudgeExpiry)}</div>
-              <div className="text-xs text-gray-500 mt-1">({fudge?.days_out ?? 60} days out • rounds to 1st/5th)</div>
+              <div className="text-xs text-gray-500 mt-1">({fudge?.days_out ?? 60} days • rounds to 1st/5th)</div>
             </div>
             <div className="rounded-xl p-4 bg-white/40 backdrop-blur border border-white/30">
               <div className="flex items-center gap-2 mb-1">
@@ -435,7 +447,7 @@ export default function LabelsTab() {
                 <span className="text-sm text-gray-600">Rice Crispy Treats</span>
               </div>
               <div className="text-2xl font-semibold text-gray-800">{formatDate(rctExpiry)}</div>
-              <div className="text-xs text-gray-500 mt-1">({rct?.days_out ?? 75} days out • rounds to 1st/5th)</div>
+              <div className="text-xs text-gray-500 mt-1">({rct?.days_out ?? 75} days • rounds to 1st/5th)</div>
             </div>
           </div>
           <p className="text-xs text-gray-500 mt-3">
@@ -452,26 +464,16 @@ export default function LabelsTab() {
             </div>
           ) : (
             <div className="h-56 rounded-xl overflow-hidden border border-white/40">
-              <iframe
-                title={pdfPreview.name}
-                src={pdfPreview.signedUrl}
-                className="w-full h-full bg-white"
-              />
+              <iframe title={pdfPreview.name} src={pdfPreview.signedUrl} className="w-full h-full bg-white" />
             </div>
           )}
           {pdfPreview && (
             <div className="flex items-center gap-2 mt-3">
-              <button
-                className="px-3 py-2 rounded-lg hover:bg-white/10 transition flex items-center gap-2"
-                onClick={() => openFile(pdfPreview)}
-              >
+              <button className="px-3 py-2 rounded-lg hover:bg-white/10 transition flex items-center gap-2" onClick={() => openFile(pdfPreview)}>
                 <Eye className="w-4 h-4" />
                 Open
               </button>
-              <button
-                className="px-3 py-2 rounded-lg hover:bg-white/10 transition flex items-center gap-2"
-                onClick={() => printFile(pdfPreview)}
-              >
+              <button className="px-3 py-2 rounded-lg hover:bg-white/10 transition flex items-center gap-2" onClick={() => printFile(pdfPreview)}>
                 <Printer className="w-4 h-4" />
                 Print
               </button>
@@ -483,12 +485,7 @@ export default function LabelsTab() {
       {/* New Product form */}
       <AnimatePresence>
         {showForm && (
-          <motion.div
-            initial={{ opacity: 0, y: -12 }}
-            animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, y: -12 }}
-            className="glass-card rounded-2xl p-6"
-          >
+          <motion.div initial={{ opacity: 0, y: -12 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -12 }} className="glass-card rounded-2xl p-6">
             <h3 className="font-quicksand text-lg font-bold text-gray-800 mb-4">Add Product</h3>
             <div className="grid sm:grid-cols-3 gap-4">
               <div className="sm:col-span-2">
@@ -499,6 +496,7 @@ export default function LabelsTab() {
                   onChange={(e) => setProductForm((s) => ({ ...s, name: e.target.value }))}
                   className="w-full glass-input rounded-lg px-4 py-3 text-gray-800 placeholder-blue-300 focus:outline-none"
                   placeholder="e.g., Caramallow Bars"
+                  required
                 />
               </div>
               <div>
@@ -509,6 +507,7 @@ export default function LabelsTab() {
                   value={productForm.days_out}
                   onChange={(e) => setProductForm((s) => ({ ...s, days_out: Number(e.target.value || 1) }))}
                   className="w-full glass-input rounded-lg px-4 py-3 text-gray-800 placeholder-blue-300 focus:outline-none"
+                  required
                 />
               </div>
             </div>
@@ -540,7 +539,19 @@ export default function LabelsTab() {
       <div className="grid lg:grid-cols-[280px_1fr_400px] gap-4">
         {/* Sidebar: Products & Folders */}
         <div className="glass-card rounded-2xl p-4">
-          <h4 className="font-quicksand font-bold text-gray-800 mb-3">Products</h4>
+          <div className="flex items-center justify-between mb-3">
+            <h4 className="font-quicksand font-bold text-gray-800">Products</h4>
+            <motion.button
+              onClick={() => setShowForm(!showForm)}
+              className="glass-button px-3 py-2 rounded-lg text-gray-800 font-quicksand font-medium flex items-center gap-2"
+              whileHover={{ scale: 1.05 }}
+              whileTap={{ scale: 0.95 }}
+            >
+              <Plus className="w-4 h-4" />
+              New
+            </motion.button>
+          </div>
+
           <div className="space-y-1">
             {products.map((p) => {
               const pending = editBuffer[p.id];
@@ -548,29 +559,18 @@ export default function LabelsTab() {
               const days = pending?.days_out ?? p.days_out;
 
               return (
-                <div
-                  key={p.id}
-                  className={`rounded-xl p-3 transition ${selectedProductId === p.id ? 'bg-white/50' : 'hover:bg-white/30'}`}
-                >
+                <div key={p.id} className={`rounded-xl p-3 transition ${selectedProductId === p.id ? 'bg-white/50' : 'hover:bg-white/30'}`}>
                   <div className="flex items-center justify-between gap-2">
-                    <button
-                      className="flex items-center gap-2 text-left w-full"
-                      onClick={() => setSelectedProductId(p.id)}
-                      title={p.folder_path}
-                    >
+                    <button className="flex items-center gap-2 text-left w-full" onClick={() => setSelectedProductId(p.id)} title={p.folder_path}>
                       <Folder className="w-4 h-4 text-indigo-500" />
                       <span className="font-medium text-gray-800 truncate">{name}</span>
                     </button>
-                    <button
-                      className="p-2 rounded hover:bg-white/40"
-                      onClick={() => deleteProduct(p.id)}
-                      title="Delete product (keeps storage files)"
-                    >
+                    <button className="p-2 rounded hover:bg-white/40" onClick={() => deleteProduct(p.id)} title="Delete product (keeps storage files)">
                       <Trash2 className="w-4 h-4 text-rose-500" />
                     </button>
                   </div>
 
-                  {/* Editable settings */}
+                  {/* Editable settings for selected product */}
                   {selectedProductId === p.id && (
                     <div className="mt-3 space-y-2">
                       <div>
@@ -620,9 +620,7 @@ export default function LabelsTab() {
         {/* Files area */}
         <div className="glass-card rounded-2xl p-4">
           <div className="flex items-center justify-between mb-3">
-            <h4 className="font-quicksand font-bold text-gray-800">
-              {selectedProduct ? `${selectedProduct.name} Files` : 'Select a product'}
-            </h4>
+            <h4 className="font-quicksand font-bold text-gray-800">{selectedProduct ? `${selectedProduct.name} Files` : 'Select a product'}</h4>
 
             <div className="flex items-center gap-2">
               <input
@@ -633,10 +631,7 @@ export default function LabelsTab() {
                 onChange={(e) => handleUpload(e.target.files)}
                 accept="application/pdf,image/*"
               />
-              <button
-                onClick={() => uploaderRef.current?.click()}
-                className="glass-button px-4 py-2 rounded-lg text-gray-800 font-quicksand font-medium flex items-center gap-2"
-              >
+              <button onClick={() => uploaderRef.current?.click()} className="glass-button px-4 py-2 rounded-lg text-gray-800 font-quicksand font-medium flex items-center gap-2">
                 <UploadCloud className="w-4 h-4" />
                 Upload
               </button>
@@ -654,7 +649,7 @@ export default function LabelsTab() {
           <div className="grid sm:grid-cols-2 xl:grid-cols-3 gap-3">
             {selectedProduct ? (
               files
-                .filter((f) => (f.isArchive ? isAdmin : true)) // hide archive if not admin
+                .filter((f) => (f.isArchive ? isAdmin : true))
                 .map((f) => (
                   <div key={f.path} className="rounded-xl p-4 bg-white/40 backdrop-blur border border-white/30">
                     <div className="flex items-start justify-between gap-2">
@@ -662,14 +657,10 @@ export default function LabelsTab() {
                         <FileText className="w-4 h-4 text-gray-600" />
                         <div>
                           <div className="font-medium text-gray-800 truncate max-w-[180px]">{f.name}</div>
-                          <div className="text-[11px] text-gray-500">
-                            {f.isArchive ? 'archive/' : ''}{selectedProduct.folder_path}
-                          </div>
+                          <div className="text-[11px] text-gray-500">{f.isArchive ? `${ARCHIVE_DIR}/` : ''}{selectedProduct.folder_path}</div>
                         </div>
                       </div>
-                      {f.isArchive ? (
-                        <div className="text-[10px] px-2 py-1 rounded bg-gray-900/10 text-gray-600">ARCHIVE</div>
-                      ) : null}
+                      {f.isArchive ? <div className="text-[10px] px-2 py-1 rounded bg-gray-900/10 text-gray-600">ARCHIVE</div> : null}
                     </div>
 
                     <div className="flex items-center gap-2 mt-3">
@@ -682,21 +673,13 @@ export default function LabelsTab() {
                         Print
                       </button>
                       {!f.isArchive && (
-                        <button
-                          className="px-3 py-2 rounded-lg hover:bg-white/10 transition text-sm flex items-center gap-2"
-                          onClick={() => moveToArchive(f)}
-                          title="Move to archive"
-                        >
+                        <button className="px-3 py-2 rounded-lg hover:bg-white/10 transition text-sm flex items-center gap-2" onClick={() => moveToArchive(f)} title="Move to archive">
                           <MoveRight className="w-4 h-4" />
                           Archive
                         </button>
                       )}
                       {isAdmin && (
-                        <button
-                          className="px-3 py-2 rounded-lg hover:bg-white/10 transition text-sm flex items-center gap-2"
-                          onClick={() => deleteFile(f)}
-                          title="Delete file"
-                        >
+                        <button className="px-3 py-2 rounded-lg hover:bg-white/10 transition text-sm flex items-center gap-2" onClick={() => deleteFile(f)} title="Delete file">
                           <Trash2 className="w-4 h-4 text-rose-600" />
                           Delete
                         </button>
@@ -725,15 +708,12 @@ export default function LabelsTab() {
               <div className="rounded-xl p-4 bg-white/40 border border-white/30">
                 <div className="text-sm text-gray-600">Days Out</div>
                 <div className="text-2xl font-semibold text-gray-800">{selectedProduct.days_out}</div>
-                <div className="text-xs text-gray-500 mt-1">
-                  Next Expiration Date: {formatDate(computeExpiry(selectedProduct.days_out))}
-                </div>
+                <div className="text-xs text-gray-500 mt-1">Next Expiration Date: {formatDate(computeExpiry(selectedProduct.days_out))}</div>
               </div>
               <div className="rounded-xl p-4 bg-white/40 border border-white/30">
                 <div className="text-sm text-gray-600">Expiration Rounding</div>
                 <div className="text-xs text-gray-700">
-                  Add days, then snap to the next available anchor date: 1st or 5th. If after the 5th,
-                  roll to the 1st of next month.
+                  Add days, then snap to the next available anchor date: 1st or 5th. If after the 5th, roll to the 1st of next month.
                 </div>
               </div>
             </div>
@@ -742,9 +722,7 @@ export default function LabelsTab() {
       </div>
 
       {/* Footer note */}
-      <div className="text-xs text-gray-500">
-        Changes auto-save after 1s of inactivity {autoSaving ? '• Saving…' : manualSaveDirty ? '• Unsaved edits' : ''}.
-      </div>
+      <div className="text-xs text-gray-500">Changes auto-save after 1s of inactivity {autoSaving ? '• Saving…' : manualSaveDirty ? '• Unsaved edits' : ''}.</div>
     </div>
   );
 }
