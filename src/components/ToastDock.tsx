@@ -1,4 +1,3 @@
-// components/ToastDock.tsx
 import { useState, useEffect, useRef } from 'react';
 import { X, Bell } from 'lucide-react';
 import { supabase } from '../lib/supabase';
@@ -19,34 +18,8 @@ export function ToastDock() {
   const [toasts, setToasts] = useState<Toast[]>([]);
   const pausedToasts = useRef<Set<string>>(new Set());
   const checkIntervalRef = useRef<number | null>(null);
-  const [bottomOffset, setBottomOffset] = useState<number>(96); // default fallback px
 
-  // ---- Measure BottomBar height dynamically ----
-  useEffect(() => {
-    const updateOffset = () => {
-      const bar = document.getElementById('bottom-bar');
-      if (bar) {
-        const height = bar.getBoundingClientRect().height || 0;
-        setBottomOffset(height + 24); // 24px = ~1.5rem gap
-      } else {
-        setBottomOffset(96);
-      }
-    };
-    updateOffset();
-
-    // re-measure on resize & if BottomBar resizes
-    const ro = new ResizeObserver(updateOffset);
-    const bar = document.getElementById('bottom-bar');
-    if (bar) ro.observe(bar);
-
-    window.addEventListener('resize', updateOffset);
-    return () => {
-      window.removeEventListener('resize', updateOffset);
-      ro.disconnect();
-    };
-  }, []);
-
-  // ---- Poll new unread notifications ----
+  // ---- Poll for new unread notifications ----
   useEffect(() => {
     const checkForNew = async () => {
       const { data, error } = await supabase
@@ -57,6 +30,7 @@ export function ToastDock() {
         .limit(5);
 
       if (error || !data) return;
+
       const existingIds = new Set(toasts.map((t) => t.id));
       const newOnes = data.filter((n) => !existingIds.has(n.id));
 
@@ -69,7 +43,7 @@ export function ToastDock() {
           created_at: n.created_at,
           timeLeft: TOAST_DURATION,
         }));
-        setToasts((prev) => [...mapped, ...prev].slice(0, 4));
+        setToasts((prev) => [...prev, ...mapped].slice(-4)); // keep 4 max
       }
     };
 
@@ -80,7 +54,7 @@ export function ToastDock() {
     };
   }, [toasts]);
 
-  // ---- Countdown loop ----
+  // ---- Countdown ----
   useEffect(() => {
     const interval = window.setInterval(() => {
       setToasts((prev) =>
@@ -110,15 +84,12 @@ export function ToastDock() {
 
   return (
     <div
-      className="fixed right-8 z-[9999] flex flex-col-reverse gap-3 pointer-events-none"
-      style={{
-        bottom: `${bottomOffset}px`,
-      }}
+      className="fixed top-20 right-8 z-[9999] flex flex-col gap-3 pointer-events-none"
     >
       {toasts.map((toast) => {
         const progress = (toast.timeLeft / TOAST_DURATION) * 100;
         const isEntering = toast.timeLeft === TOAST_DURATION;
-        const translateX = isEntering ? 400 : 0;
+        const translateY = isEntering ? -60 : 0;
         const fadeWindow = 200;
         const opacity =
           toast.timeLeft > fadeWindow ? 1 : Math.max(0, toast.timeLeft / fadeWindow);
@@ -128,7 +99,7 @@ export function ToastDock() {
             key={toast.id}
             className="pointer-events-auto bg-white rounded-xl shadow-2xl border border-blue-100 w-96 max-w-[90vw] overflow-hidden transition-all duration-300"
             style={{
-              transform: `translateX(${translateX}px)`,
+              transform: `translateY(${translateY}px)`,
               opacity,
             }}
             onMouseEnter={() => handlePause(toast.id, true)}
@@ -162,6 +133,7 @@ export function ToastDock() {
               </div>
             </div>
 
+            {/* Progress bar */}
             <div className="h-1 bg-gray-100">
               <div
                 className="h-full bg-blue-500 transition-all duration-100 linear"
