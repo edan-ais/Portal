@@ -237,14 +237,14 @@ export default function LabelsTab() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedProductId, products.length]);
 
-  // ------ Monitor & Updater ------
+   // ------ Monitor & Updater ------
   const pingHeartbeat = async () => {
     try {
       const url = `${import.meta.env.VITE_LABEL_UPDATER_URL}/`;
       const res = await fetch(url, { method: 'GET' });
       setHeartbeatOk(res.ok);
       setHeartbeatAt(new Date());
-      addNotification('info', 'Status refreshed');
+      // No notification on auto-refresh
     } catch {
       setHeartbeatOk(false);
       addNotification('error', 'Status check failed');
@@ -271,13 +271,14 @@ export default function LabelsTab() {
         headers: { Authorization: `Bearer ${import.meta.env.VITE_LABEL_UPDATER_SECRET}` }
       });
       if (!res.ok) throw new Error('failed to trigger updater');
-      addNotification('success', 'Label updater triggered');
       await fetchStatusMeta();
       // refresh current folder if open
       if (selectedProductId) {
         const p = products.find((x) => x.id === selectedProductId);
         if (p) await loadFiles(p);
       }
+      // Keep notification for manual updater runs
+      addNotification('success', 'Label updater started');
     } catch (e) {
       console.error(e);
       addNotification('error', 'Failed to run label updater. Please check configuration.');
@@ -471,29 +472,32 @@ export default function LabelsTab() {
     e.stopPropagation();
     handleUpload(e.dataTransfer.files);
   }
+
   function onDragOver(e: React.DragEvent<HTMLDivElement>) {
     e.preventDefault();
     e.stopPropagation();
   }
 
-  // ------ Product CRUD / edits ------
-  async function addFolder() {
-    const name = window.prompt('Folder (Product) Name');
-    if (!name) return;
-    const daysStr = window.prompt('Days Out', '60');
-    const days_out = Math.max(1, Number(daysStr || 60));
-    const slug = slugify(name);
-    const folder_path = `${slug}/`;
-    const { data: inserted } = await supabase
-      .from('products')
-      .insert([{ name, slug, days_out, manual_expiry_date: null, folder_path }])
-      .select('*')
-      .single<Product>();
-    if (inserted) {
-      setProducts((p) => [...p, inserted]);
-      await ensureProductPlaceholders(inserted);
-    }
+  const [showAddModal, setShowAddModal] = useState(false);
+
+async function addFolderSubmit(name: string, mode: 'auto' | 'manual', value: string) {
+  const slug = slugify(name);
+  const folder_path = `${slug}/`;
+  const days_out = mode === 'auto' ? Math.max(1, Number(value) || 60) : null;
+  const manual_expiry_date = mode === 'manual' ? value : null;
+
+  const { data: inserted } = await supabase
+    .from('products')
+    .insert([{ name, slug, days_out, manual_expiry_date, folder_path }])
+    .select('*')
+    .single<Product>();
+
+  if (inserted) {
+    setProducts((p) => [...p, inserted]);
+    await ensureProductPlaceholders(inserted);
   }
+  setShowAddModal(false);
+}
 
   async function importFolder() {
     const folder = window.prompt('Existing folder path in Storage (e.g., "legacy-fudge/")');
@@ -804,11 +808,6 @@ export default function LabelsTab() {
             Save
           </motion.button>
 
-          {/* Autosave tracker */}
-          <div className="px-3 py-2 rounded-lg bg-white/40 border border-white/40 text-xs text-gray-700">
-            {autoSaving ? 'Auto-saving…' : manualSaveDirty ? 'Unsaved edits' : 'All changes saved'}
-          </div>
-
           {/* Recently deleted */}
           <button
             className="px-3 py-2 rounded-lg hover:bg-white/10 transition flex items-center gap-2 text-gray-700"
@@ -871,7 +870,7 @@ export default function LabelsTab() {
           {/* Actions over grid */}
           <div className="flex items-center gap-2">
             <button
-              onClick={addFolder}
+              onClick={() => setShowAddModal(true)}
               className="glass-button px-4 py-2 rounded-lg text-gray-800 font-quicksand font-medium flex items-center gap-2"
               title="Add Folder"
             >
@@ -930,10 +929,10 @@ export default function LabelsTab() {
                         className="p-2 rounded hover:bg-white/60"
                         title="Edit"
                         onClick={(e) => {
-                          e.stopPropagation();
-                          const v = document.getElementById(`edit-${p.id}`) as HTMLDivElement | null;
-                          if (v) v.classList.toggle('hidden');
-                        }}
+  e.stopPropagation();
+  setSelectedProductId(selectedProductId === p.id ? null : p.id);
+}}
+
                       >
                         <Pencil className="w-4 h-4 text-gray-600" />
                       </button>
@@ -961,12 +960,14 @@ export default function LabelsTab() {
                     </div>
                   </div>
 
-                  {/* Inline quick edit (hidden by default) */}
-                  <div
-                    id={`edit-${p.id}`}
-                    className="hidden mt-3 space-y-3"
-                    onClick={(e) => e.stopPropagation()}
-                  >
+                  {/* Inline quick edit (per-folder isolated) */}
+<div
+  id={`edit-${p.id}`}
+  className={`${
+    selectedProductId === p.id ? 'block' : 'hidden'
+  } mt-4 space-y-3 relative z-10`}
+  onClick={(e) => e.stopPropagation()}
+>
                     {/* Mode */}
                     <div className="flex items-center gap-4 text-sm">
                       <label className="flex items-center gap-2">
@@ -1330,6 +1331,77 @@ function NotificationToast({
     error: 'bg-red-500',
     info: 'bg-blue-500'
   };
+
+  {/* ===== Add Folder Modal ===== */}
+<AnimatePresence>
+  {showAddModal && (
+    <motion.div
+      className="fixed inset-0 z-50 flex items-center justify-center"
+      initial={{ opacity: 0 }}
+      animate={{ opacity: 1 }}
+      exit={{ opacity: 0 }}
+    >
+      <div
+        className="absolute inset-0 bg-black/30 backdrop-blur-sm"
+        onClick={() => setShowAddModal(false)}
+      />
+      <motion.div
+        initial={{ scale: 0.95, opacity: 0 }}
+        animate={{ scale: 1, opacity: 1 }}
+        exit={{ scale: 0.95, opacity: 0 }}
+        className="relative z-10 w-[90vw] max-w-md bg-white rounded-2xl shadow-2xl p-6"
+      >
+        <h3 className="text-lg font-semibold text-gray-800 mb-4">Add Product Folder</h3>
+        <form
+          onSubmit={(e) => {
+            e.preventDefault();
+            const fd = new FormData(e.currentTarget);
+            const name = String(fd.get('name') || '').trim();
+            const mode = String(fd.get('mode')) as 'auto' | 'manual';
+            const value = String(fd.get('value') || '').trim();
+            if (name && value) addFolderSubmit(name, mode, value);
+          }}
+          className="space-y-4"
+        >
+          <div>
+            <label className="text-xs text-gray-500">Product Name</label>
+            <input name="name" required className="w-full rounded-lg border px-3 py-2" />
+          </div>
+
+          <div className="flex gap-4 text-sm">
+            <label className="flex items-center gap-2">
+              <input type="radio" name="mode" value="auto" defaultChecked /> Auto (Days)
+            </label>
+            <label className="flex items-center gap-2">
+              <input type="radio" name="mode" value="manual" /> Manual (Date)
+            </label>
+          </div>
+
+          <div>
+            <label className="text-xs text-gray-500">Days or Date</label>
+            <input name="value" required className="w-full rounded-lg border px-3 py-2" placeholder="e.g., 60 or 2025-10-15" />
+          </div>
+
+          <div className="flex justify-end gap-2">
+            <button
+              type="button"
+              onClick={() => setShowAddModal(false)}
+              className="px-3 py-2 text-gray-600 hover:bg-gray-100 rounded-lg"
+            >
+              Cancel
+            </button>
+            <button
+              type="submit"
+              className="px-4 py-2 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700"
+            >
+              Add Folder
+            </button>
+          </div>
+        </form>
+      </motion.div>
+    </motion.div>
+  )}
+</AnimatePresence>
 
   return (
     <motion.div
