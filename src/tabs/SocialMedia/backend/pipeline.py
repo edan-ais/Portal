@@ -23,7 +23,8 @@ _model, _preprocess = clip.load("ViT-B/32", device=_device)
 # ---------- utils ----------
 @contextmanager
 def TmpDir(root: str):
-    p = os.path.join(root, f"job_{os.getpid()}_{np.random.randint(1e9)}")
+    import time
+    p = os.path.join(root, f"job_{os.getpid()}_{int(time.time()*1000)}_{np.random.randint(1e9)}")
     os.makedirs(p, exist_ok=True)
     try:
         yield p
@@ -33,7 +34,6 @@ def TmpDir(root: str):
 def _image_embedding_from_frame(frame: np.ndarray) -> torch.Tensor:
     if frame.dtype != np.uint8:
         frame = np.clip(frame, 0, 255).astype(np.uint8)
-    # BGR -> RGB if needed
     if frame.ndim == 3 and frame.shape[-1] == 3:
         frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
     pil_image = Image.fromarray(frame)
@@ -49,8 +49,7 @@ def _video_embedding(path: str, n_frames: int = MAX_FRAMES_PER_VIDEO):
         times = [clip_obj.duration * i / (n_frames + 1) for i in range(1, n_frames + 1)]
         embs = []
         for t in times:
-            frame = clip_obj.get_frame(t)  # RGB float [0,1] by moviepy
-            # convert to uint8
+            frame = clip_obj.get_frame(t)  # RGB float [0,1]
             if frame.dtype != np.uint8:
                 frame = np.clip(frame * 255.0, 0, 255).astype(np.uint8)
             embs.append(_image_embedding_from_frame(frame))
@@ -76,8 +75,9 @@ def _resize_crop_9x16_image(path: str) -> ImageClip:
 
 def build_montage_for_paths(local_paths: List[str]) -> str:
     """
-    Given a list of local video/image paths, returns the path to the composed MP4.
+    Build a 9:16 montage from local video/image paths.
     Videos are ordered by CLIP similarity; images appended after.
+    Returns local path to the MP4.
     """
     video_exts = (".mp4", ".mov", ".m4v", ".avi", ".mkv")
     image_exts = (".jpg", ".jpeg", ".png", ".webp")
@@ -85,7 +85,7 @@ def build_montage_for_paths(local_paths: List[str]) -> str:
     videos = [p for p in local_paths if p.lower().endswith(video_exts)]
     images = [p for p in local_paths if p.lower().endswith(image_exts)]
 
-    # Order videos by greedy CLIP cosine similarity
+    # Greedy similarity ordering for videos
     ordered_videos = []
     remaining = []
     for v in videos:
@@ -98,22 +98,20 @@ def build_montage_for_paths(local_paths: List[str]) -> str:
         ordered_videos.append(current)
         while remaining:
             sims = [torch.cosine_similarity(current["emb"], r["emb"], dim=0) for r in remaining]
-            next_idx = int(torch.argmax(torch.stack(sims)))
+            import torch as _torch
+            next_idx = int(_torch.argmax(_torch.stack(sims)))
             current = remaining.pop(next_idx)
             ordered_videos.append(current)
 
-    # Compose
+    # Compose clips
     final_clips = []
-    # videos
     for v in ordered_videos:
         vc = VideoFileClip(v["path"])
         final_clips.append(_resize_crop_9x16_video(vc))
-    # images
     for im in images:
         final_clips.append(_resize_crop_9x16_image(im))
 
     if not final_clips:
-        # create a 1s blank clip to avoid pipeline errors; callers can handle empty pipeline too
         raise RuntimeError("No usable video or image clips found to compose.")
 
     out_dir = os.path.dirname(local_paths[0]) if local_paths else "/tmp"
@@ -121,7 +119,6 @@ def build_montage_for_paths(local_paths: List[str]) -> str:
     final = concatenate_videoclips(final_clips, method="compose")
     final.write_videofile(out_path, fps=30)
 
-    # Ensure resources are freed
     try:
         final.close()
     except Exception:
