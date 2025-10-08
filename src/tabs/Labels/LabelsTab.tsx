@@ -123,6 +123,7 @@ export default function LabelsTab() {
 
   const [products, setProducts] = useState<Product[]>([]);
   const [selectedProductId, setSelectedProductId] = useState<UUID | null>(null); // null => grid
+  const [editingProductId, setEditingProductId] = useState<UUID | null>(null); // track which folder is being edited
 
   const [isAdmin, setIsAdmin] = useState(false);
 
@@ -933,7 +934,7 @@ export default function LabelsTab() {
                         title="Edit"
                         onClick={(e) => {
                           e.stopPropagation();
-                          setSelectedProductId(selectedProductId === p.id ? null : p.id);
+                          setEditingProductId(editingProductId === p.id ? null : p.id);
                         }}
                       >
                         <Pencil className="w-4 h-4 text-gray-600" />
@@ -965,7 +966,7 @@ export default function LabelsTab() {
                   {/* Inline quick edit (per-folder isolated) */}
                   <div
                     id={`edit-${p.id}`}
-                    className={`${selectedProductId === p.id ? 'block' : 'hidden'} mt-4 space-y-3 relative z-10`}
+                    className={`${editingProductId === p.id ? 'block' : 'hidden'} mt-4 space-y-3 relative z-10`}
                     onClick={(e) => e.stopPropagation()}
                   >
                     {/* Mode */}
@@ -1249,7 +1250,7 @@ export default function LabelsTab() {
       <AnimatePresence>
         {trashOpen && (
           <motion.div
-            className="absolute inset-0 z-50 flex items-center justify-center"
+            className="fixed inset-0 z-50 flex items-center justify-center"
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
@@ -1302,7 +1303,7 @@ export default function LabelsTab() {
       <AnimatePresence>
         {showAddModal && (
           <motion.div
-            className="absolute inset-0 z-50 flex items-center justify-center"
+            className="fixed inset-0 z-50 flex items-center justify-center"
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
