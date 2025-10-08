@@ -156,14 +156,10 @@ export default function LabelsTab() {
   const [trashOpen, setTrashOpen] = useState(false);
   const [recentlyDeleted, setRecentlyDeleted] = useState<DeletedItem[]>([]);
 
-  // Notification helpers
+  // Notification helpers (ALWAYS add; no dedupe so Save toasts always appear)
   const addNotification = (type: 'success' | 'error' | 'info', message: string, duration = 5000) => {
-    setNotifications((prev) => {
-      const exists = prev.some((n) => n.message === message && n.type === type);
-      if (exists) return prev;
-      const id = `${Date.now()}-${Math.random()}`;
-      return [...prev, { id, type, message, duration }];
-    });
+    const id = `${Date.now()}-${Math.random()}`;
+    setNotifications((prev) => [...prev, { id, type, message, duration }]);
   };
   const removeNotification = (id: string) => setNotifications((prev) => prev.filter((n) => n.id !== id));
 
@@ -237,7 +233,7 @@ export default function LabelsTab() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedProductId, products.length]);
 
-   // ------ Monitor & Updater ------
+  // ------ Monitor & Updater ------
   const pingHeartbeat = async () => {
     try {
       const url = `${import.meta.env.VITE_LABEL_UPDATER_URL}/`;
@@ -255,7 +251,7 @@ export default function LabelsTab() {
     try {
       const url = `${import.meta.env.VITE_LABEL_UPDATER_URL}/api/status`;
       const res = await fetch(url, { method: 'GET' });
-      if (!res.ok) return;
+    if (!res.ok) return;
       const data: UpdaterStatus = await res.json();
       setStatusMeta(data);
     } catch {
@@ -480,24 +476,24 @@ export default function LabelsTab() {
 
   const [showAddModal, setShowAddModal] = useState(false);
 
-async function addFolderSubmit(name: string, mode: 'auto' | 'manual', value: string) {
-  const slug = slugify(name);
-  const folder_path = `${slug}/`;
-  const days_out = mode === 'auto' ? Math.max(1, Number(value) || 60) : null;
-  const manual_expiry_date = mode === 'manual' ? value : null;
+  async function addFolderSubmit(name: string, mode: 'auto' | 'manual', value: string) {
+    const slug = slugify(name);
+    const folder_path = `${slug}/`;
+    const days_out = mode === 'auto' ? Math.max(1, Number(value) || 60) : null;
+    const manual_expiry_date = mode === 'manual' ? value : null;
 
-  const { data: inserted } = await supabase
-    .from('products')
-    .insert([{ name, slug, days_out, manual_expiry_date, folder_path }])
-    .select('*')
-    .single<Product>();
+    const { data: inserted } = await supabase
+      .from('products')
+      .insert([{ name, slug, days_out, manual_expiry_date, folder_path }])
+      .select('*')
+      .single<Product>();
 
-  if (inserted) {
-    setProducts((p) => [...p, inserted]);
-    await ensureProductPlaceholders(inserted);
+    if (inserted) {
+      setProducts((p) => [...p, inserted]);
+      await ensureProductPlaceholders(inserted);
+    }
+    setShowAddModal(false);
   }
-  setShowAddModal(false);
-}
 
   async function importFolder() {
     const folder = window.prompt('Existing folder path in Storage (e.g., "legacy-fudge/")');
@@ -705,7 +701,7 @@ async function addFolderSubmit(name: string, mode: 'auto' | 'manual', value: str
     if (pending.manual_expiry_date) {
       updateObj.days_out = null;
     } else {
-      updateObj.days_out = Math.max(1, Math.floor((pending.days_out ?? 1)));
+      updateObj.days_out = Math.max(1, Math.floor(pending.days_out ?? 1));
       updateObj.manual_expiry_date = null;
     }
 
@@ -722,11 +718,14 @@ async function addFolderSubmit(name: string, mode: 'auto' | 'manual', value: str
   }
 
   async function saveAll() {
+    // Keep spinner ON for the whole batch save
+    setAutoSaving(true);
     const ids = Object.keys(editBuffer) as UUID[];
     for (const pid of ids) {
       await autoSave(pid);
     }
     setManualSaveDirty(false);
+    setAutoSaving(false);
     addNotification('success', 'All changes saved');
   }
 
@@ -746,7 +745,7 @@ async function addFolderSubmit(name: string, mode: 'auto' | 'manual', value: str
   }
 
   return (
-    <div className="h-full flex flex-col space-y-6">
+    <div className="relative h-full flex flex-col space-y-6">
       {/* ===== Header Bar (monitor + refresh + run + save + autosave tracker + trash) ===== */}
       <div className="flex items-center justify-between">
         {/* Left: Title */}
@@ -804,8 +803,8 @@ async function addFolderSubmit(name: string, mode: 'auto' | 'manual', value: str
             title="Save all changes"
             disabled={!manualSaveDirty && !autoSaving}
           >
-            <Save className="w-5 h-5" />
-            Save
+            <Save className={`w-5 h-5 ${autoSaving ? 'animate-spin' : ''}`} />
+            {autoSaving ? 'Saving…' : 'Save'}
           </motion.button>
 
           {/* Recently deleted */}
@@ -869,22 +868,26 @@ async function addFolderSubmit(name: string, mode: 'auto' | 'manual', value: str
         <div className="flex-1 flex flex-col space-y-4 overflow-y-auto">
           {/* Actions over grid */}
           <div className="flex items-center gap-2">
-            <button
+            <motion.button
               onClick={() => setShowAddModal(true)}
               className="glass-button px-4 py-2 rounded-lg text-gray-800 font-quicksand font-medium flex items-center gap-2"
+              whileHover={{ scale: 1.05 }}
+              whileTap={{ scale: 0.95 }}
               title="Add Folder"
             >
               <Plus className="w-4 h-4" />
               Add Folder
-            </button>
-            <button
+            </motion.button>
+            <motion.button
               onClick={importFolder}
               className="glass-button px-4 py-2 rounded-lg text-gray-800 font-quicksand font-medium flex items-center gap-2"
+              whileHover={{ scale: 1.05 }}
+              whileTap={{ scale: 0.95 }}
               title="Import Folder"
             >
               <UploadCloud className="w-4 h-4" />
               Import Folder
-            </button>
+            </motion.button>
           </div>
 
           {/* Grid of product folder cards */}
@@ -926,15 +929,15 @@ async function addFolderSubmit(name: string, mode: 'auto' | 'manual', value: str
                     </div>
                     <div className="flex items-center gap-1">
                       <button
-  className="p-2 rounded hover:bg-white/60"
-  title="Edit"
-  onClick={(e) => {
-    e.stopPropagation();
-    setSelectedProductId(p.id);
-  }}
->
-  <Pencil className="w-4 h-4 text-gray-600" />
-</button>
+                        className="p-2 rounded hover:bg-white/60"
+                        title="Edit"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setSelectedProductId(selectedProductId === p.id ? null : p.id);
+                        }}
+                      >
+                        <Pencil className="w-4 h-4 text-gray-600" />
+                      </button>
                       <button
                         className="p-2 rounded hover:bg-white/60"
                         title="Delete Folder"
@@ -960,13 +963,11 @@ async function addFolderSubmit(name: string, mode: 'auto' | 'manual', value: str
                   </div>
 
                   {/* Inline quick edit (per-folder isolated) */}
-<div
-  id={`edit-${p.id}`}
-  className={`${
-    selectedProductId === p.id ? 'block' : 'hidden'
-  } mt-4 space-y-3 relative z-10`}
-  onClick={(e) => e.stopPropagation()}
->
+                  <div
+                    id={`edit-${p.id}`}
+                    className={`${selectedProductId === p.id ? 'block' : 'hidden'} mt-4 space-y-3 relative z-10`}
+                    onClick={(e) => e.stopPropagation()}
+                  >
                     {/* Mode */}
                     <div className="flex items-center gap-4 text-sm">
                       <label className="flex items-center gap-2">
@@ -1073,24 +1074,28 @@ async function addFolderSubmit(name: string, mode: 'auto' | 'manual', value: str
                 accept="application/pdf,image/*"
                 disabled={uploading}
               />
-              <button
+              <motion.button
                 onClick={() => uploaderRef.current?.click()}
                 className="glass-button px-3 py-2 rounded-lg text-gray-800 font-quicksand font-medium flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
                 title="Add files"
                 disabled={uploading}
+                whileHover={{ scale: 1.05 }}
+                whileTap={{ scale: 0.95 }}
               >
                 <UploadCloud className="w-4 h-4" />
                 {uploading ? 'Uploading...' : 'Add Files'}
-              </button>
-              <button
+              </motion.button>
+              <motion.button
                 onClick={() => uploaderRef.current?.click()}
                 className="glass-button px-3 py-2 rounded-lg text-gray-800 font-quicksand font-medium flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
                 title="Import files"
                 disabled={uploading}
+                whileHover={{ scale: 1.05 }}
+                whileTap={{ scale: 0.95 }}
               >
                 <UploadCloud className="w-4 h-4" />
                 Import Files
-              </button>
+              </motion.button>
             </div>
           </div>
 
@@ -1133,36 +1138,44 @@ async function addFolderSubmit(name: string, mode: 'auto' | 'manual', value: str
                     ) : null}
                   </div>
                   <div className="mt-3 flex items-center gap-2">
-                    <button
+                    <motion.button
                       className="px-3 py-2 rounded-lg hover:bg-white/10 transition text-sm flex items-center gap-2"
                       onClick={() => openFile(f)}
                       title="Open"
+                      whileHover={{ scale: 1.05 }}
+                      whileTap={{ scale: 0.95 }}
                     >
                       <Eye className="w-4 h-4" /> Open
-                    </button>
-                    <button
+                    </motion.button>
+                    <motion.button
                       className="px-3 py-2 rounded-lg hover:bg-white/10 transition text-sm flex items-center gap-2"
                       onClick={() => printFile(f)}
                       title="Print"
+                      whileHover={{ scale: 1.05 }}
+                      whileTap={{ scale: 0.95 }}
                     >
                       <Printer className="w-4 h-4" /> Print
-                    </button>
+                    </motion.button>
                     {!f.isArchive && (
                       <>
-                        <button
+                        <motion.button
                           className="px-3 py-2 rounded-lg hover:bg-white/10 transition text-sm flex items-center gap-2"
                           onClick={() => moveToArchive(f)}
                           title="Archive"
+                          whileHover={{ scale: 1.05 }}
+                          whileTap={{ scale: 0.95 }}
                         >
                           <MoveRight className="w-4 h-4" /> Archive
-                        </button>
-                        <button
+                        </motion.button>
+                        <motion.button
                           className="px-3 py-2 rounded-lg hover:bg-white/10 transition text-sm flex items-center gap-2"
                           onClick={() => softDeleteFile(f)}
                           title="Delete"
+                          whileHover={{ scale: 1.05 }}
+                          whileTap={{ scale: 0.95 }}
                         >
                           <Trash2 className="w-4 h-4 text-rose-600" /> Delete
-                        </button>
+                        </motion.button>
                       </>
                     )}
                   </div>
@@ -1236,7 +1249,7 @@ async function addFolderSubmit(name: string, mode: 'auto' | 'manual', value: str
       <AnimatePresence>
         {trashOpen && (
           <motion.div
-            className="fixed inset-0 z-50 flex items-center justify-center"
+            className="absolute inset-0 z-50 flex items-center justify-center"
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
@@ -1267,12 +1280,14 @@ async function addFolderSubmit(name: string, mode: 'auto' | 'manual', value: str
                         {it.kind === 'file' ? it.original_path || '' : it.product_snapshot?.folder_path || ''}
                       </div>
                       <div className="mt-3 flex items-center gap-2">
-                        <button
+                        <motion.button
                           className="px-3 py-2 rounded-lg bg-emerald-50 hover:bg-emerald-100 text-emerald-700 text-sm"
                           onClick={() => restoreItem(it)}
+                          whileHover={{ scale: 1.05 }}
+                          whileTap={{ scale: 0.95 }}
                         >
                           Restore
-                        </button>
+                        </motion.button>
                       </div>
                     </div>
                   ))
@@ -1284,75 +1299,77 @@ async function addFolderSubmit(name: string, mode: 'auto' | 'manual', value: str
       </AnimatePresence>
 
       {/* ===== Add Folder Modal ===== */}
-<AnimatePresence>
-  {showAddModal && (
-    <motion.div
-      className="fixed inset-0 z-50 flex items-center justify-center"
-      initial={{ opacity: 0 }}
-      animate={{ opacity: 1 }}
-      exit={{ opacity: 0 }}
-    >
-      <div
-        className="absolute inset-0 bg-black/30 backdrop-blur-sm"
-        onClick={() => setShowAddModal(false)}
-      />
-      <motion.div
-        initial={{ scale: 0.95, opacity: 0 }}
-        animate={{ scale: 1, opacity: 1 }}
-        exit={{ scale: 0.95, opacity: 0 }}
-        className="relative z-10 w-[90vw] max-w-md bg-white rounded-2xl shadow-2xl p-6"
-      >
-        <h3 className="text-lg font-semibold text-gray-800 mb-4">Add Product Folder</h3>
-        <form
-          onSubmit={(e) => {
-            e.preventDefault();
-            const fd = new FormData(e.currentTarget);
-            const name = String(fd.get('name') || '').trim();
-            const mode = String(fd.get('mode')) as 'auto' | 'manual';
-            const value = String(fd.get('value') || '').trim();
-            if (name && value) addFolderSubmit(name, mode, value);
-          }}
-          className="space-y-4"
-        >
-          <div>
-            <label className="text-xs text-gray-500">Product Name</label>
-            <input name="name" required className="w-full rounded-lg border px-3 py-2" />
-          </div>
-
-          <div className="flex gap-4 text-sm">
-            <label className="flex items-center gap-2">
-              <input type="radio" name="mode" value="auto" defaultChecked /> Auto (Days)
-            </label>
-            <label className="flex items-center gap-2">
-              <input type="radio" name="mode" value="manual" /> Manual (Date)
-            </label>
-          </div>
-
-          <div>
-            <label className="text-xs text-gray-500">Days or Date</label>
-            <input name="value" required className="w-full rounded-lg border px-3 py-2" placeholder="e.g., 60 or 2025-10-15" />
-          </div>
-
-          <div className="flex justify-end gap-2">
-            <button
-              type="button"
+      <AnimatePresence>
+        {showAddModal && (
+          <motion.div
+            className="absolute inset-0 z-50 flex items-center justify-center"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+          >
+            <div
+              className="absolute inset-0 bg-black/30 backdrop-blur-sm"
               onClick={() => setShowAddModal(false)}
-              className="px-3 py-2 text-gray-600 hover:bg-gray-100 rounded-lg"
+            />
+            <motion.div
+              initial={{ scale: 0.95, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.95, opacity: 0 }}
+              className="relative z-10 w-[90vw] max-w-md bg-white rounded-2xl shadow-2xl p-6"
             >
-              Cancel
-            </button>
-            <button
-              type="submit"
-              className="px-4 py-2 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700"
-            >
-              Add Folder
-            </button>
-          </div>
-        </form>
-      </motion.div>
-    </motion.div>
-  )}
-</AnimatePresence>
+              <h3 className="text-lg font-semibold text-gray-800 mb-4">Add Product Folder</h3>
+              <form
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  const fd = new FormData(e.currentTarget);
+                  const name = String(fd.get('name') || '').trim();
+                  const mode = String(fd.get('mode')) as 'auto' | 'manual';
+                  const value = String(fd.get('value') || '').trim();
+                  if (name && value) addFolderSubmit(name, mode, value);
+                }}
+                className="space-y-4"
+              >
+                <div>
+                  <label className="text-xs text-gray-500">Product Name</label>
+                  <input name="name" required className="w-full rounded-lg border px-3 py-2" />
+                </div>
+
+                <div className="flex gap-4 text-sm">
+                  <label className="flex items-center gap-2">
+                    <input type="radio" name="mode" value="auto" defaultChecked /> Auto (Days)
+                  </label>
+                  <label className="flex items-center gap-2">
+                    <input type="radio" name="mode" value="manual" /> Manual (Date)
+                  </label>
+                </div>
+
+                <div>
+                  <label className="text-xs text-gray-500">Days or Date</label>
+                  <input name="value" required className="w-full rounded-lg border px-3 py-2" placeholder="e.g., 60 or 2025-10-15" />
+                </div>
+
+                <div className="flex justify-end gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setShowAddModal(false)}
+                    className="px-3 py-2 text-gray-600 hover:bg-gray-100 rounded-lg"
+                  >
+                    Cancel
+                  </button>
+                  <motion.button
+                    type="submit"
+                    className="px-4 py-2 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700"
+                    whileHover={{ scale: 1.05 }}
+                    whileTap={{ scale: 0.95 }}
+                  >
+                    Add Folder
+                  </motion.button>
+                </div>
+              </form>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
 
       {/* ===== Notification System - Top Right ===== */}
       <div className="fixed top-32 right-4 z-50 flex flex-col gap-3 max-w-md w-96 pointer-events-none">
