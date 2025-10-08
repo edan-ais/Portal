@@ -15,97 +15,112 @@ if (!supabaseUrl || !supabaseAnonKey) {
 }
 
 console.log('🔗 Connecting to Supabase...');
-console.log(`URL: ${supabaseUrl}`);
+console.log(`URL: ${supabaseUrl}\n`);
 
 const supabase = createClient(supabaseUrl, supabaseAnonKey);
 
+const REQUIRED_TABLES = [
+  'products',
+  'files',
+  'profiles',
+  'tasks',
+  'notifications',
+  'events',
+  'leads',
+  'social_posts',
+  'labels',
+  'donations',
+  'store_products',
+  'transactions'
+];
+
 async function testConnection() {
+  let allPassed = true;
+  const issues = [];
+
   try {
-    console.log('\n📦 Testing products table...');
-    const { data: products, error: productsError } = await supabase
-      .from('products')
-      .select('id, name, slug')
-      .limit(5);
+    console.log('═══════════════════════════════════════════════════════');
+    console.log('  DATABASE CONNECTION TEST');
+    console.log('═══════════════════════════════════════════════════════\n');
 
-    if (productsError) {
-      console.error('❌ Products table error:', productsError.message);
-    } else {
-      console.log(`✅ Products table accessible (${products.length} rows fetched)`);
-      if (products.length > 0) {
-        console.log('   Sample:', products[0]);
-      }
-    }
+    // Test each required table
+    for (const tableName of REQUIRED_TABLES) {
+      process.stdout.write(`📋 Testing ${tableName.padEnd(20, ' ')}... `);
 
-    console.log('\n📁 Testing files table...');
-    const { data: files, error: filesError } = await supabase
-      .from('files')
-      .select('id, name, folder_id')
-      .limit(5);
+      const { data, error } = await supabase
+        .from(tableName)
+        .select('id')
+        .limit(1);
 
-    if (filesError) {
-      console.error('❌ Files table error:', filesError.message);
-    } else {
-      console.log(`✅ Files table accessible (${files.length} rows fetched)`);
-    }
-
-    console.log('\n🗄️ Testing storage bucket...');
-    const { data: buckets, error: bucketsError } = await supabase.storage.listBuckets();
-
-    if (bucketsError) {
-      console.error('❌ Storage listBuckets error:', bucketsError.message);
-      console.log('   This might be a permissions issue - trying direct bucket access...');
-    } else if (!buckets || buckets.length === 0) {
-      console.warn('⚠️ listBuckets returned empty array (might be RLS permission issue)');
-      console.log('   Trying to access bucket directly...');
-    } else {
-      const labelsBucket = buckets.find(b => b.name === 'labels');
-      if (labelsBucket) {
-        console.log('✅ Storage bucket "labels" found via listBuckets');
-        console.log('   Bucket details:', labelsBucket);
+      if (error) {
+        console.log('❌ FAILED');
+        console.log(`   Error: ${error.message}\n`);
+        issues.push(`${tableName} table is missing or has errors`);
+        allPassed = false;
       } else {
-        console.warn('⚠️ Storage bucket "labels" NOT FOUND in listBuckets');
-        console.log('   Available buckets:', buckets.map(b => b.name).join(', '));
+        console.log('✅ OK');
       }
     }
 
-    console.log('\n🔍 Testing direct bucket access...');
+    // Test storage bucket
+    console.log('\n🗄️  Testing storage bucket...');
     const { data: bucketFiles, error: bucketError } = await supabase.storage
       .from('labels')
-      .list();
+      .list('', { limit: 1 });
 
     if (bucketError) {
       if (bucketError.message.includes('not found')) {
-        console.error('❌ Bucket "labels" does NOT exist');
+        console.log('❌ Bucket "labels" does NOT exist');
+        issues.push('Storage bucket "labels" needs to be created');
       } else {
-        console.error('❌ Bucket access error:', bucketError.message);
+        console.log(`⚠️  Bucket access issue: ${bucketError.message}`);
+        issues.push('Storage bucket "labels" has permission issues');
       }
+      allPassed = false;
     } else {
-      console.log('✅ Bucket "labels" exists and is accessible');
-      console.log(`   Files in bucket: ${bucketFiles.length}`);
+      console.log(`✅ Bucket "labels" exists (${bucketFiles.length} items)`);
     }
 
+    // Check products table for manual_expiry_date column
     console.log('\n📋 Checking products table schema...');
-    const { data: schemaData, error: schemaError } = await supabase
+    const { data: products, error: productsError } = await supabase
       .from('products')
-      .select('*')
-      .limit(0);
+      .select('id, name, slug, days_out, manual_expiry_date')
+      .limit(1);
 
-    if (schemaError) {
-      console.error('❌ Schema check error:', schemaError.message);
+    if (productsError) {
+      console.log('❌ Products table schema issue');
+      console.log(`   Error: ${productsError.message}`);
+      issues.push('Products table missing manual_expiry_date column');
+      allPassed = false;
     } else {
-      console.log('✅ Products table exists');
+      console.log('✅ Products table schema is correct');
+      if (products && products.length > 0) {
+        console.log(`   Sample product: ${products[0].name}`);
+      }
     }
 
-    console.log('\n✅ Database connection test complete!');
-    console.log('\n📝 Summary:');
-    console.log('   ✅ Database is connected');
-    console.log('   ✅ Products table exists');
-    console.log('   ✅ Storage bucket "labels" is accessible');
-
-    if (filesError) {
-      console.log('\n⚠️  Issues found:');
-      console.log('   - Files table missing or has schema issues');
-      console.log('   - Check DATABASE_SETUP.md for setup instructions');
+    // Summary
+    console.log('\n═══════════════════════════════════════════════════════');
+    if (allPassed) {
+      console.log('  ✅ ALL TESTS PASSED');
+      console.log('═══════════════════════════════════════════════════════\n');
+      console.log('🎉 Your Supabase database is properly configured!');
+      console.log('   All tables exist and are accessible.');
+      console.log('   Storage bucket is ready for file uploads.\n');
+    } else {
+      console.log('  ⚠️  ISSUES FOUND');
+      console.log('═══════════════════════════════════════════════════════\n');
+      console.log('The following issues were detected:\n');
+      issues.forEach((issue, i) => {
+        console.log(`  ${i + 1}. ${issue}`);
+      });
+      console.log('\n📝 To fix these issues:');
+      console.log('   1. Open setup-database.sql in your project root');
+      console.log('   2. Go to: https://supabase.com/dashboard/project/hxpbjtimdctvhxqulnce/sql');
+      console.log('   3. Copy and paste the entire SQL script');
+      console.log('   4. Click "Run" to execute the migration');
+      console.log('   5. Run npm run test-db again to verify\n');
     }
 
   } catch (error) {
