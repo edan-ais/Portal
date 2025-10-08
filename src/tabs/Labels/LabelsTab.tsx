@@ -183,12 +183,23 @@ export default function LabelsTab() {
       }
       setIsAdmin(admin);
 
-      // Check buckets (console info only)
+      // Check buckets and create if needed
       try {
         const { data: buckets } = await supabase.storage.listBuckets();
         const labelsBucket = buckets?.find((b: any) => b.name === LABELS_BUCKET);
         if (!labelsBucket) {
-          console.warn('[Labels] Labels bucket not found! Storage uploads will fail.');
+          console.warn('[Labels] Labels bucket not found! Attempting to create...');
+          const { error: createError } = await supabase.storage.createBucket(LABELS_BUCKET, {
+            public: false,
+            fileSizeLimit: 52428800
+          });
+          if (createError) {
+            console.error('[Labels] Failed to create bucket:', createError);
+            addNotification('error', 'Storage bucket setup failed. File uploads may not work.');
+          } else {
+            console.log('[Labels] Bucket created successfully');
+            addNotification('info', 'Storage initialized successfully');
+          }
         }
       } catch (e) {
         console.error('[Labels] Error checking buckets:', e);
@@ -402,9 +413,11 @@ export default function LabelsTab() {
         });
         if (uploadError) {
           console.error('[Labels] Storage upload error for', f.name, uploadError);
+          console.error('[Labels] Upload details:', { dest, size: f.size, type: f.type });
           errorCount++;
           continue;
         }
+        console.log('[Labels] Successfully uploaded:', f.name, 'to', dest);
 
         const { data: existingFile, error: queryError } = await supabase.from('files').select('id').eq('file_path', dest).maybeSingle();
         if (queryError) {
@@ -746,7 +759,7 @@ export default function LabelsTab() {
   }
 
   return (
-    <div className="relative h-full flex flex-col space-y-6 overflow-hidden">
+    <div className="relative h-full flex flex-col space-y-6">
       {/* ===== Header Bar (monitor + refresh + run + save + autosave tracker + trash) ===== */}
       <div className="flex items-center justify-between">
         {/* Left: Title */}
@@ -1251,12 +1264,12 @@ export default function LabelsTab() {
       <AnimatePresence>
         {trashOpen && (
           <motion.div
-            className="absolute inset-0 z-50 flex items-center justify-center"
+            className="fixed inset-0 z-[60] flex items-center justify-center"
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
           >
-            <div className="absolute inset-0 bg-black/30 backdrop-blur-sm" onClick={() => setTrashOpen(false)} />
+            <div className="fixed inset-0 bg-black/30 backdrop-blur-sm" onClick={() => setTrashOpen(false)} />
             <motion.div
               initial={{ scale: 0.95, opacity: 0 }}
               animate={{ scale: 1, opacity: 1 }}
@@ -1304,13 +1317,13 @@ export default function LabelsTab() {
       <AnimatePresence>
         {showAddModal && (
           <motion.div
-            className="absolute inset-0 z-50 flex items-center justify-center"
+            className="fixed inset-0 z-[60] flex items-center justify-center"
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
           >
             <div
-              className="absolute inset-0 bg-black/30 backdrop-blur-sm"
+              className="fixed inset-0 bg-black/30 backdrop-blur-sm"
               onClick={() => setShowAddModal(false)}
             />
             <motion.div
