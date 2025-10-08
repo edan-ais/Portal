@@ -746,7 +746,7 @@ export default function LabelsTab() {
   }
 
   return (
-    <div className="relative h-full flex flex-col space-y-6">
+    <div className="relative h-full flex flex-col space-y-6 overflow-hidden">
       {/* ===== Header Bar (monitor + refresh + run + save + autosave tracker + trash) ===== */}
       <div className="flex items-center justify-between">
         {/* Left: Title */}
@@ -776,6 +776,7 @@ export default function LabelsTab() {
               onClick={() => {
                 pingHeartbeat();
                 fetchStatusMeta();
+                addNotification('info', 'Refreshing status...');
               }}
               title="Refresh"
             >
@@ -1250,7 +1251,7 @@ export default function LabelsTab() {
       <AnimatePresence>
         {trashOpen && (
           <motion.div
-            className="fixed inset-0 z-50 flex items-center justify-center"
+            className="absolute inset-0 z-50 flex items-center justify-center"
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
@@ -1303,7 +1304,7 @@ export default function LabelsTab() {
       <AnimatePresence>
         {showAddModal && (
           <motion.div
-            className="fixed inset-0 z-50 flex items-center justify-center"
+            className="absolute inset-0 z-50 flex items-center justify-center"
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
