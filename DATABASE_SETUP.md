@@ -1,6 +1,8 @@
 # Database Setup Required
 
-Your Supabase database needs a few updates to work properly with the Labels feature. Please run these SQL commands in your Supabase SQL Editor.
+Your Supabase database needs a few updates to work properly with the Labels feature. Please complete all three steps below.
+
+**Important:** The application will check for the storage bucket but won't try to create it automatically. You must create it manually in your Supabase Dashboard.
 
 ## Step 1: Add Missing Column to Products Table
 
@@ -61,8 +63,9 @@ USING (bucket_id = 'labels');
 After completing these steps:
 
 1. Refresh your application
-2. Check the browser console - you should no longer see RLS errors
-3. Try uploading a file to test the setup
+2. Check the browser console - you should see "[Labels] Labels bucket found and ready"
+3. You should NOT see any "Storage bucket setup failed" errors
+4. Try uploading a file to test the setup
 
 ## Supabase Dashboard URLs
 
