@@ -7,9 +7,11 @@
 Your Supabase database is **99% ready**. Just one quick step needed:
 
 1. **Open this link:** https://supabase.com/dashboard/project/hxpbjtimdctvhxqulnce/sql
-2. **Copy all text** from `setup-database.sql` file in your project
+2. **Copy text from `setup-database.sql`** - Copy ONLY up to line 281 (stop before "EVERYTHING BELOW THIS LINE")
 3. **Paste into SQL Editor** and click **Run**
 4. **Verify:** Run `npm run test-db` - you should see "ALL TESTS PASSED"
+
+**Important:** The script only creates missing tables. It won't modify your existing data.
 
 That's it! 🎉
 
