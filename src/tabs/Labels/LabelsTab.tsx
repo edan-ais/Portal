@@ -906,7 +906,7 @@ export default function LabelsTab() {
           </div>
 
           {/* Grid of product folder cards */}
-          <div className="grid sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6">
+          <div className="flex flex-wrap gap-6">
             {products.map((p) => {
               const pending = editBuffer[p.id];
               const name = pending?.name ?? p.name;
@@ -934,11 +934,11 @@ export default function LabelsTab() {
                   key={p.id}
                   initial={{ opacity: 0, y: 6 }}
                   animate={{ opacity: 1, y: 0 }}
-                  className={`rounded-2xl p-4 bg-white/50 border-2 ${outline} hover:shadow-xl transition cursor-pointer`}
+                  className={`rounded-2xl p-4 bg-white/50 border-2 ${outline} hover:shadow-xl transition cursor-pointer min-w-fit`}
                   onClick={() => setSelectedProductId(p.id)}
                 >
                   <div className="flex items-start justify-between">
-                    <div className="flex items-center gap-2">
+                    <div className="flex items-center gap-2 whitespace-nowrap">
                       <Folder className="w-5 h-5 text-indigo-500" />
                       <div className="font-semibold text-gray-800">{name}</div>
                     </div>
