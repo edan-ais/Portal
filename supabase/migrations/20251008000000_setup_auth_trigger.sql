@@ -56,24 +56,38 @@ CREATE TRIGGER on_auth_user_created
   EXECUTE FUNCTION handle_new_user();
 
 -- =============================================================================
--- UPDATE PROFILES TABLE CONSTRAINT
+-- UPDATE PROFILES TABLE
 -- =============================================================================
 
--- Add foreign key constraint if it doesn't exist
+-- Ensure user_id column exists and has correct type
 DO $$
 BEGIN
+  -- Check if user_id column exists, if not create it
   IF NOT EXISTS (
+    SELECT 1
+    FROM information_schema.columns
+    WHERE table_name = 'profiles'
+    AND column_name = 'user_id'
+  ) THEN
+    ALTER TABLE profiles ADD COLUMN user_id uuid;
+  END IF;
+
+  -- Drop existing foreign key if it exists (in case it was created incorrectly)
+  IF EXISTS (
     SELECT 1
     FROM information_schema.table_constraints
     WHERE constraint_name = 'profiles_user_id_fkey'
     AND table_name = 'profiles'
   ) THEN
-    ALTER TABLE profiles
-    ADD CONSTRAINT profiles_user_id_fkey
-    FOREIGN KEY (user_id)
-    REFERENCES auth.users(id)
-    ON DELETE CASCADE;
+    ALTER TABLE profiles DROP CONSTRAINT profiles_user_id_fkey;
   END IF;
+
+  -- Add the foreign key constraint
+  ALTER TABLE profiles
+  ADD CONSTRAINT profiles_user_id_fkey
+  FOREIGN KEY (user_id)
+  REFERENCES auth.users(id)
+  ON DELETE CASCADE;
 END $$;
 
 -- =============================================================================
