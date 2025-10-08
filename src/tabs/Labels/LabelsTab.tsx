@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import {
   Tag,
   Plus,
@@ -1208,21 +1209,22 @@ export default function LabelsTab() {
       )}
 
       {/* ===== Preview Modal ===== */}
-      <AnimatePresence>
-        {previewOpen && previewFile && (
-          <motion.div
-            className="fixed inset-0 z-50 flex items-center justify-center"
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            exit={{ opacity: 0 }}
-          >
-            <div
-              className="absolute inset-0 bg-black/30 backdrop-blur-sm"
-              onClick={() => {
-                setPreviewOpen(false);
-                setPreviewFile(null);
-              }}
-            />
+      {createPortal(
+        <AnimatePresence>
+          {previewOpen && previewFile && (
+            <motion.div
+              className="fixed inset-0 z-50 flex items-center justify-center"
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+            >
+              <div
+                className="fixed inset-0 bg-black/30 backdrop-blur-sm"
+                onClick={() => {
+                  setPreviewOpen(false);
+                  setPreviewFile(null);
+                }}
+              />
             <motion.div
               initial={{ scale: 0.95, opacity: 0 }}
               animate={{ scale: 1, opacity: 1 }}
@@ -1252,20 +1254,23 @@ export default function LabelsTab() {
                 </button>
               </div>
             </motion.div>
-          </motion.div>
-        )}
-      </AnimatePresence>
+            </motion.div>
+          )}
+        </AnimatePresence>,
+        document.body
+      )}
 
       {/* ===== Trash Modal ===== */}
-      <AnimatePresence>
-        {trashOpen && (
-          <motion.div
-            className="absolute inset-0 z-[60] flex items-center justify-center"
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            exit={{ opacity: 0 }}
-          >
-            <div className="absolute inset-0 bg-black/30 backdrop-blur-sm" onClick={() => setTrashOpen(false)} />
+      {createPortal(
+        <AnimatePresence>
+          {trashOpen && (
+            <motion.div
+              className="fixed inset-0 z-[60] flex items-center justify-center"
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+            >
+              <div className="fixed inset-0 bg-black/30 backdrop-blur-sm" onClick={() => setTrashOpen(false)} />
             <motion.div
               initial={{ scale: 0.95, opacity: 0 }}
               animate={{ scale: 1, opacity: 1 }}
@@ -1305,23 +1310,26 @@ export default function LabelsTab() {
                 )}
               </div>
             </motion.div>
-          </motion.div>
-        )}
-      </AnimatePresence>
+            </motion.div>
+          )}
+        </AnimatePresence>,
+        document.body
+      )}
 
       {/* ===== Add Folder Modal ===== */}
-      <AnimatePresence>
-        {showAddModal && (
-          <motion.div
-            className="absolute inset-0 z-[60] flex items-center justify-center"
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            exit={{ opacity: 0 }}
-          >
-            <div
-              className="absolute inset-0 bg-black/30 backdrop-blur-sm"
-              onClick={() => setShowAddModal(false)}
-            />
+      {createPortal(
+        <AnimatePresence>
+          {showAddModal && (
+            <motion.div
+              className="fixed inset-0 z-[60] flex items-center justify-center"
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+            >
+              <div
+                className="fixed inset-0 bg-black/30 backdrop-blur-sm"
+                onClick={() => setShowAddModal(false)}
+              />
             <motion.div
               initial={{ scale: 0.95, opacity: 0 }}
               animate={{ scale: 1, opacity: 1 }}
@@ -1378,9 +1386,11 @@ export default function LabelsTab() {
                 </div>
               </form>
             </motion.div>
-          </motion.div>
-        )}
-      </AnimatePresence>
+            </motion.div>
+          )}
+        </AnimatePresence>,
+        document.body
+      )}
 
       {/* ===== Notification System - Top Right ===== */}
       <div className="fixed top-32 right-4 z-50 flex flex-col gap-3 max-w-md w-96 pointer-events-none">
