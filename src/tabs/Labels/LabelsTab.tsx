@@ -1141,12 +1141,12 @@ export default function LabelsTab() {
                   className="rounded-2xl p-4 bg-white/50 border border-white/40 hover:shadow-lg transition"
                 >
                   <div className="flex items-start justify-between gap-2">
-                    <div className="flex items-center gap-2">
-                      <FileText className="w-4 h-4 text-gray-600" />
-                      <div className="font-medium text-gray-800 truncate max-w-[200px]">{f.name}</div>
+                    <div className="flex items-start gap-2 min-w-0 flex-1">
+                      <FileText className="w-4 h-4 text-gray-600 mt-1 flex-shrink-0" />
+                      <div className="font-medium text-gray-800 break-words whitespace-normal">{f.name}</div>
                     </div>
                     {f.isArchive ? (
-                      <div className="text-[10px] px-2 py-1 rounded bg-gray-900/10 text-gray-600">ARCHIVE</div>
+                      <div className="text-[10px] px-2 py-1 rounded bg-gray-900/10 text-gray-600 flex-shrink-0">ARCHIVE</div>
                     ) : null}
                   </div>
                   <div className="mt-3 flex items-center gap-2">
