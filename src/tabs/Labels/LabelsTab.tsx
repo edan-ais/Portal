@@ -28,15 +28,16 @@ interface Product {
   id: UUID;
   name: string;
   slug: string;
-  days_out: number;
-  folder_path: string; // e.g., "fudge/"
+  days_out: number | null;             // allow null in manual mode
+  manual_expiry_date?: string | null;  // NEW: manual mode
+  folder_path: string;                 // e.g., "fudge/"
   created_at?: string;
 }
 
 interface FileItem {
-  name: string;            // filename.pdf
-  path: string;            // productSlug/filename.pdf, or productSlug/archive/filename.pdf
-  signedUrl?: string;      // for viewing/printing
+  name: string;      // filename.pdf
+  path: string;      // productSlug/filename.pdf, or productSlug/archive/filename.pdf
+  signedUrl?: string;
   isArchive?: boolean;
   mimeType?: string;
   created_at?: string;
@@ -52,15 +53,15 @@ interface DeletedItem {
   id: string;
   kind: 'file' | 'product';
   product_id: string | null;
-  original_path: string | null;   // for files or folders
-  trash_path: string | null;      // storage path inside _trash/
-  product_snapshot: any | null;   // JSON of product row when kind='product'
-  deleted_at: string;             // ISO
+  original_path: string | null;
+  trash_path: string | null;
+  product_snapshot: any | null;
+  deleted_at: string;
 }
 
 interface UpdaterStatus {
-  last_run: string | null;        // ISO or null
-  cooldown_seconds: number;       // e.g. 86400
+  last_run: string | null;
+  cooldown_seconds: number;
 }
 
 interface Notification {
@@ -74,6 +75,7 @@ const LABELS_BUCKET = 'labels';
 const ARCHIVE_DIR = 'archive';
 const TRASH_PREFIX = '_trash/';
 
+// ---------- Helpers ----------
 function slugify(input: string) {
   return input.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)+/g, '');
 }
@@ -82,7 +84,7 @@ function slugify(input: string) {
  * Expiration Rule (UPDATED): add daysOut, then snap forward to the 1st or 15th,
  * whichever is the next anchor date at/after target. If after the 15th, roll to 1st next month.
  */
-function computeExpiry(daysOut: number, now = new Date()) {
+function computeExpiryFromDays(daysOut: number, now = new Date()) {
   const target = new Date(now);
   target.setDate(target.getDate() + daysOut);
   const y = target.getFullYear();
@@ -92,38 +94,55 @@ function computeExpiry(daysOut: number, now = new Date()) {
   if (d <= 15) return new Date(y, m, 15);
   return new Date(y, m + 1, 1);
 }
+
 function formatDate(d?: Date | null) {
   if (!d) return '—';
   return d.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
 }
-function addSeconds(ts: Date, sec: number) {
-  const n = new Date(ts);
-  n.setSeconds(n.getSeconds() + sec);
-  return n;
+
+/** Next switch date for AUTO mode: the first date in the future when the rounded expiry would change */
+function nextSwitchDateForAuto(daysOut: number, now = new Date()) {
+  const startExpiry = computeExpiryFromDays(daysOut, now).getTime();
+  for (let i = 1; i <= 62; i++) {
+    const t = new Date(now);
+    t.setDate(t.getDate() + i);
+    const exp = computeExpiryFromDays(daysOut, t).getTime();
+    if (exp !== startExpiry) return t;
+  }
+  // Fallback (shouldn't happen), assume next month 1st
+  return new Date(now.getFullYear(), now.getMonth() + 1, 1);
 }
 
+// ---------- Component ----------
 export default function LabelsTab() {
-  // ------ Global state ------
+  // Global state
   const [loading, setLoading] = useState(true);
   const [heartbeatOk, setHeartbeatOk] = useState<boolean | null>(null);
   const [heartbeatAt, setHeartbeatAt] = useState<Date | null>(null);
-  const [updaterStatus, setUpdaterStatus] = useState<'idle' | 'running' | 'done' | 'error'>('idle');
-  const [updaterSummary, setUpdaterSummary] = useState<any[]>([]);
   const [statusMeta, setStatusMeta] = useState<UpdaterStatus | null>(null);
 
   const [products, setProducts] = useState<Product[]>([]);
-  const [selectedProductId, setSelectedProductId] = useState<UUID | null>(null); // null => grid, not folder view
+  const [selectedProductId, setSelectedProductId] = useState<UUID | null>(null); // null => grid
+
   const [isAdmin, setIsAdmin] = useState(false);
 
   // Edits + saving
-  const [editBuffer, setEditBuffer] = useState<Record<UUID, { name: string; days_out: number }>>({});
+  const [editBuffer, setEditBuffer] = useState<Record<
+    UUID,
+    { name: string; days_out: number | null; manual_expiry_date: string | null }
+  >>({});
   const [autoSaving, setAutoSaving] = useState(false);
   const [manualSaveDirty, setManualSaveDirty] = useState(false);
+  const debounceTimers = useRef<Record<UUID, any>>({});
 
   // Files in current folder
   const [files, setFiles] = useState<FileItem[]>([]);
   const uploaderRef = useRef<HTMLInputElement | null>(null);
   const [uploading, setUploading] = useState(false);
+  const [uploadError, setUploadError] = useState<string | null>(null);
+  const [uploadSuccess, setUploadSuccess] = useState(false);
+
+  // Debug
   const [showDebug, setShowDebug] = useState(false);
 
   // Notification system
@@ -137,34 +156,21 @@ export default function LabelsTab() {
   const [trashOpen, setTrashOpen] = useState(false);
   const [recentlyDeleted, setRecentlyDeleted] = useState<DeletedItem[]>([]);
 
-  // simple debounce map for auto-save
-  const debounceTimers = useRef<Record<UUID, any>>({});
-
-  // Notification helper with deduplication
+  // Notification helpers
   const addNotification = (type: 'success' | 'error' | 'info', message: string, duration = 5000) => {
     setNotifications((prev) => {
-      // Check if a notification with the same message already exists
-      const exists = prev.some(n => n.message === message && n.type === type);
-      if (exists) {
-        console.log('[Labels] Skipping duplicate notification:', message);
-        return prev;
-      }
-
+      const exists = prev.some((n) => n.message === message && n.type === type);
+      if (exists) return prev;
       const id = `${Date.now()}-${Math.random()}`;
-      console.log('[Labels] Adding notification:', type, message);
       return [...prev, { id, type, message, duration }];
     });
   };
-
-  const removeNotification = (id: string) => {
-    setNotifications((prev) => prev.filter((n) => n.id !== id));
-  };
+  const removeNotification = (id: string) => setNotifications((prev) => prev.filter((n) => n.id !== id));
 
   // ------ Bootstrap ------
   useEffect(() => {
     (async () => {
       setLoading(true);
-
       // Admin detection
       const { data: sessionRes } = await supabase.auth.getSession();
       const user = sessionRes?.session?.user;
@@ -180,16 +186,12 @@ export default function LabelsTab() {
       }
       setIsAdmin(admin);
 
-      // Check if storage bucket exists
+      // Check buckets (console info only)
       try {
-        const { data: buckets, error: bucketsError } = await supabase.storage.listBuckets();
-        console.log('[Labels] Available buckets:', buckets);
-
-        const labelsBucket = buckets?.find(b => b.name === LABELS_BUCKET);
+        const { data: buckets } = await supabase.storage.listBuckets();
+        const labelsBucket = buckets?.find((b: any) => b.name === LABELS_BUCKET);
         if (!labelsBucket) {
           console.warn('[Labels] Labels bucket not found! Storage uploads will fail.');
-        } else {
-          console.log('[Labels] Labels bucket found:', labelsBucket);
         }
       } catch (e) {
         console.error('[Labels] Error checking buckets:', e);
@@ -197,15 +199,16 @@ export default function LabelsTab() {
 
       // Products
       const { data: prod } = await supabase.from('products').select('*').order('created_at', { ascending: true });
-      let list: Product[] = prod || [];
+      let list: Product[] = (prod || []) as Product[];
+
       if (!list || list.length === 0) {
-        // seed two defaults
+        // seed two defaults (idempotent)
         const seed = [
-          { name: 'Fudge', slug: 'fudge', days_out: 60, folder_path: 'fudge/' },
-          { name: 'Rice Crispy Treats', slug: 'rice-crispy-treats', days_out: 75, folder_path: 'rice-crispy-treats/' }
+          { name: 'Fudge', slug: 'fudge', days_out: 60, manual_expiry_date: null, folder_path: 'fudge/' },
+          { name: 'Rice Crispy Treats', slug: 'rice-crispy-treats', days_out: 75, manual_expiry_date: null, folder_path: 'rice-crispy-treats/' }
         ];
         const { data: inserted } = await supabase.from('products').insert(seed).select('*');
-        list = inserted || [];
+        list = (inserted || []) as Product[];
       }
       setProducts(list);
 
@@ -213,7 +216,6 @@ export default function LabelsTab() {
       await pingHeartbeat();
       await fetchStatusMeta();
       const iv = setInterval(pingHeartbeat, 30_000);
-
       setLoading(false);
       return () => clearInterval(iv);
     })();
@@ -224,16 +226,11 @@ export default function LabelsTab() {
   useEffect(() => {
     (async () => {
       if (!selectedProductId) {
-        console.log('[Labels] No product selected, clearing files');
         setFiles([]);
         return;
       }
       const p = products.find((x) => x.id === selectedProductId);
-      if (!p) {
-        console.log('[Labels] Product not found for id:', selectedProductId);
-        return;
-      }
-      console.log('[Labels] Effect: Loading files for selected product:', p.name);
+      if (!p) return;
       await ensureProductPlaceholders(p);
       await loadFiles(p);
     })();
@@ -247,10 +244,13 @@ export default function LabelsTab() {
       const res = await fetch(url, { method: 'GET' });
       setHeartbeatOk(res.ok);
       setHeartbeatAt(new Date());
+      addNotification('info', 'Status refreshed');
     } catch {
       setHeartbeatOk(false);
+      addNotification('error', 'Status check failed');
     }
   };
+
   const fetchStatusMeta = async () => {
     try {
       const url = `${import.meta.env.VITE_LABEL_UPDATER_URL}/api/status`;
@@ -258,29 +258,28 @@ export default function LabelsTab() {
       if (!res.ok) return;
       const data: UpdaterStatus = await res.json();
       setStatusMeta(data);
-    } catch { /* noop */ }
+    } catch {
+      /* noop */
+    }
   };
+
   const triggerUpdater = async () => {
     try {
-      setUpdaterStatus('running');
       const url = `${import.meta.env.VITE_LABEL_UPDATER_URL}/api/run`;
       const res = await fetch(url, {
         method: 'POST',
         headers: { Authorization: `Bearer ${import.meta.env.VITE_LABEL_UPDATER_SECRET}` }
       });
       if (!res.ok) throw new Error('failed to trigger updater');
-      const data = await res.json();
-      setUpdaterSummary(data.summary || []);
-      setUpdaterStatus('done');
+      addNotification('success', 'Label updater triggered');
       await fetchStatusMeta();
-      // refresh current folder if any
+      // refresh current folder if open
       if (selectedProductId) {
         const p = products.find((x) => x.id === selectedProductId);
         if (p) await loadFiles(p);
       }
     } catch (e) {
       console.error(e);
-      setUpdaterStatus('error');
       addNotification('error', 'Failed to run label updater. Please check configuration.');
     }
   };
@@ -289,39 +288,38 @@ export default function LabelsTab() {
   async function ensureProductPlaceholders(product: Product) {
     const keepMain = `${product.folder_path}.keep`;
     const keepArchive = `${product.folder_path}${ARCHIVE_DIR}/.keep`;
-
     try {
       const listMain = await supabase.storage.from(LABELS_BUCKET).list(product.folder_path, { limit: 1 });
       if (!listMain.data || listMain.data.length === 0) {
-        await supabase.storage.from(LABELS_BUCKET).upload(keepMain, new Blob([''], { type: 'text/plain' }), { upsert: true });
+        await supabase.storage.from(LABELS_BUCKET).upload(keepMain, new Blob([''], { type: 'text/plain' }), {
+          upsert: true
+        });
       }
     } catch (_) {}
-
     try {
-      const listArc = await supabase.storage.from(LABELS_BUCKET).list(`${product.folder_path}${ARCHIVE_DIR}`, { limit: 1 });
+      const listArc = await supabase.storage.from(LABELS_BUCKET).list(`${product.folder_path}${ARCHIVE_DIR}`, {
+        limit: 1
+      });
       if (!listArc.data || listArc.data.length === 0) {
-        await supabase.storage.from(LABELS_BUCKET).upload(keepArchive, new Blob([''], { type: 'text/plain' }), { upsert: true });
+        await supabase.storage.from(LABELS_BUCKET).upload(keepArchive, new Blob([''], { type: 'text/plain' }), {
+          upsert: true
+        });
       }
     } catch (_) {}
   }
-  async function loadFiles(product: Product) {
-    console.log('[Labels] Loading files for product:', product.id, product.name, product.folder_path);
 
+  async function loadFiles(product: Product) {
     const { data: dbFiles, error } = await supabase
       .from('files')
       .select('*')
       .eq('folder_id', product.id)
       .eq('is_trashed', false)
       .order('created_at', { ascending: false });
-
     if (error) {
       console.error('[Labels] Error loading files:', error);
       return;
     }
-
-    console.log('[Labels] Loaded files from DB:', dbFiles);
-
-    const fileItems: FileItem[] = (dbFiles || []).map((f) => ({
+    const fileItems: FileItem[] = (dbFiles || []).map((f: any) => ({
       name: f.name,
       path: f.file_path,
       created_at: f.created_at,
@@ -329,10 +327,9 @@ export default function LabelsTab() {
       mimeType: f.mime_type,
       isArchive: f.file_path.includes(`/${ARCHIVE_DIR}/`)
     }));
-
-    console.log('[Labels] Setting files state:', fileItems);
     setFiles(fileItems);
   }
+
   async function signUrl(path: string) {
     const { data, error } = await supabase.storage.from(LABELS_BUCKET).createSignedUrl(path, 60 * 10);
     if (error) return null;
@@ -346,23 +343,20 @@ export default function LabelsTab() {
     setPreviewFile({ ...file, signedUrl: url });
     setPreviewOpen(true);
   }
+
   async function printFile(file: FileItem) {
     const url = await signUrl(file.path);
     if (!url) return;
     window.open(url, '_blank', 'noopener,noreferrer');
   }
+
   async function moveToArchive(file: FileItem) {
     if (file.isArchive) return;
     const p = products.find((x) => x.id === selectedProductId);
     if (!p) return;
     const dest = `${p.folder_path}${ARCHIVE_DIR}/${file.name}`;
     await supabase.storage.from(LABELS_BUCKET).move(file.path, dest);
-
-    await supabase
-      .from('files')
-      .update({ file_path: dest })
-      .eq('file_path', file.path);
-
+    await supabase.from('files').update({ file_path: dest }).eq('file_path', file.path);
     await loadFiles(p);
   }
 
@@ -373,12 +367,7 @@ export default function LabelsTab() {
     const stamp = Date.now();
     const trashPath = `${TRASH_PREFIX}${file.path}.${stamp}`;
     await supabase.storage.from(LABELS_BUCKET).move(file.path, trashPath);
-
-    await supabase
-      .from('files')
-      .update({ is_trashed: true, trashed_at: new Date().toISOString() })
-      .eq('file_path', file.path);
-
+    await supabase.from('files').update({ is_trashed: true, trashed_at: new Date().toISOString() }).eq('file_path', file.path);
     await supabase.from('deleted_items').insert({
       kind: 'file',
       product_id: p.id,
@@ -393,19 +382,9 @@ export default function LabelsTab() {
   }
 
   async function handleUpload(filesToUpload: FileList | null) {
-    if (!filesToUpload || !selectedProductId) {
-      console.log('[Labels] Upload aborted: no files or no product selected');
-      return;
-    }
-
+    if (!filesToUpload || !selectedProductId) return;
     const p = products.find((x) => x.id === selectedProductId);
-    if (!p) {
-      console.error('[Labels] Upload aborted: product not found');
-      return;
-    }
-
-    console.log('[Labels] Starting upload for product:', p.id, p.name, p.folder_path);
-    console.log('[Labels] Files to upload:', Array.from(filesToUpload).map(f => f.name));
+    if (!p) return;
 
     setUploading(true);
     setUploadError(null);
@@ -414,59 +393,44 @@ export default function LabelsTab() {
     try {
       const { data: sessionRes } = await supabase.auth.getSession();
       const userId = sessionRes?.session?.user?.id || null;
-
       let successCount = 0;
       let errorCount = 0;
 
       for (const f of Array.from(filesToUpload)) {
         const dest = `${p.folder_path}${f.name}`;
-        console.log(`[Labels] Uploading file: ${f.name} to ${dest}`);
-
-        const { error: uploadError } = await supabase.storage
-          .from(LABELS_BUCKET)
-          .upload(dest, f, { upsert: true, contentType: f.type });
-
+        const { error: uploadError } = await supabase.storage.from(LABELS_BUCKET).upload(dest, f, {
+          upsert: true,
+          contentType: f.type
+        });
         if (uploadError) {
-          console.error(`[Labels] Storage upload error for ${f.name}:`, uploadError);
+          console.error('[Labels] Storage upload error for', f.name, uploadError);
           errorCount++;
           continue;
         }
 
-        console.log(`[Labels] Storage upload success for ${f.name}`);
-
-        const { data: existingFile, error: queryError } = await supabase
-          .from('files')
-          .select('id')
-          .eq('file_path', dest)
-          .maybeSingle();
-
+        const { data: existingFile, error: queryError } = await supabase.from('files').select('id').eq('file_path', dest).maybeSingle();
         if (queryError) {
-          console.error(`[Labels] Query error for ${f.name}:`, queryError);
+          console.error('[Labels] Query error for', f.name, queryError);
           errorCount++;
           continue;
         }
-
         if (existingFile) {
-          console.log(`[Labels] Updating existing file record for ${f.name}:`, existingFile.id);
           const { error: updateError } = await supabase
             .from('files')
             .update({
               file_size: f.size,
               mime_type: f.type || 'application/octet-stream',
-              updated_at: new Date().toISOString(),
+              updated_at: new Date().toISOString()
             })
             .eq('id', existingFile.id);
-
           if (updateError) {
-            console.error(`[Labels] Update error for ${f.name}:`, updateError);
+            console.error('[Labels] Update error for', f.name, updateError);
             errorCount++;
           } else {
-            console.log(`[Labels] Updated file record for ${f.name}`);
             successCount++;
           }
         } else {
-          console.log(`[Labels] Creating new file record for ${f.name}`);
-          const { data: insertedFile, error: insertError } = await supabase
+          const { error: insertError } = await supabase
             .from('files')
             .insert({
               folder_id: selectedProductId,
@@ -474,43 +438,34 @@ export default function LabelsTab() {
               file_path: dest,
               file_size: f.size,
               mime_type: f.type || 'application/octet-stream',
-              created_by: userId,
+              created_by: userId
             })
             .select();
-
           if (insertError) {
-            console.error(`[Labels] Insert error for ${f.name}:`, insertError);
+            console.error('[Labels] Insert error for', f.name, insertError);
             errorCount++;
           } else {
-            console.log(`[Labels] Created file record for ${f.name}:`, insertedFile);
             successCount++;
           }
         }
       }
 
-      console.log(`[Labels] Upload complete: ${successCount} success, ${errorCount} errors`);
+      if (successCount > 0 && errorCount === 0) addNotification('success', `${successCount} file(s) uploaded successfully`);
+      else if (successCount > 0 && errorCount > 0) addNotification('info', `${successCount} uploaded, ${errorCount} failed`);
+      else if (errorCount > 0 && successCount === 0) addNotification('error', 'All files failed to upload. Check console for details.');
 
-      // Only show summary notifications, not individual file errors (those are shown per-file above)
-      if (successCount > 0 && errorCount === 0) {
-        addNotification('success', `${successCount} file(s) uploaded successfully`);
-      } else if (successCount > 0 && errorCount > 0) {
-        addNotification('info', `${successCount} uploaded, ${errorCount} failed`);
-      } else if (errorCount > 0 && successCount === 0) {
-        addNotification('error', 'All files failed to upload. Check console for details.');
-      }
-
-      if (uploaderRef.current) {
-        uploaderRef.current.value = '';
-      }
-
+      if (uploaderRef.current) uploaderRef.current.value = '';
       await loadFiles(p);
+      setUploadSuccess(true);
     } catch (e) {
       console.error('[Labels] Unexpected error during upload:', e);
       addNotification('error', 'An unexpected error occurred during upload');
+      setUploadError('Unexpected error');
     } finally {
       setUploading(false);
     }
   }
+
   function onDrop(e: React.DragEvent<HTMLDivElement>) {
     e.preventDefault();
     e.stopPropagation();
@@ -531,7 +486,7 @@ export default function LabelsTab() {
     const folder_path = `${slug}/`;
     const { data: inserted } = await supabase
       .from('products')
-      .insert([{ name, slug, days_out, folder_path }])
+      .insert([{ name, slug, days_out, manual_expiry_date: null, folder_path }])
       .select('*')
       .single<Product>();
     if (inserted) {
@@ -539,6 +494,7 @@ export default function LabelsTab() {
       await ensureProductPlaceholders(inserted);
     }
   }
+
   async function importFolder() {
     const folder = window.prompt('Existing folder path in Storage (e.g., "legacy-fudge/")');
     if (!folder) return;
@@ -550,7 +506,7 @@ export default function LabelsTab() {
     const folder_path = folder.endsWith('/') ? folder : `${folder}/`;
     const { data: inserted } = await supabase
       .from('products')
-      .insert([{ name, slug, days_out, folder_path }])
+      .insert([{ name, slug, days_out, manual_expiry_date: null, folder_path }])
       .select('*')
       .single<Product>();
     if (inserted) {
@@ -559,21 +515,25 @@ export default function LabelsTab() {
     }
   }
 
-  // Soft delete product: move all files under folder (and archive) into trash + record one product snapshot
+  // Soft delete product: move all files to trash + record snapshot
   async function softDeleteProduct(pid: UUID) {
     const product = products.find((x) => x.id === pid);
     if (!product) return;
-    // List files
+
     const root = await supabase.storage.from(LABELS_BUCKET).list(product.folder_path, { limit: 1000 });
     const arch = await supabase.storage.from(LABELS_BUCKET).list(`${product.folder_path}${ARCHIVE_DIR}`, { limit: 1000 });
 
     const allFiles: { name: string; isArchive: boolean }[] = [
-      ...(root.data || []).filter((e: any) => e && !e.name.endsWith('.keep')).map((e: any) => ({ name: e.name, isArchive: false })),
-      ...(arch.data || []).filter((e: any) => e && !e.name.endsWith('.keep')).map((e: any) => ({ name: e.name, isArchive: true }))
+      ...(root.data || [])
+        .filter((e: any) => e && !e.name.endsWith('.keep'))
+        .map((e: any) => ({ name: e.name, isArchive: false })),
+      ...(arch.data || [])
+        .filter((e: any) => e && !e.name.endsWith('.keep'))
+        .map((e: any) => ({ name: e.name, isArchive: true }))
     ];
-
     const mappings: { from: string; to: string }[] = [];
     const stamp = Date.now();
+
     for (const f of allFiles) {
       const fromPath = `${product.folder_path}${f.isArchive ? `${ARCHIVE_DIR}/` : ''}${f.name}`;
       const toPath = `${TRASH_PREFIX}${product.folder_path}${f.isArchive ? `${ARCHIVE_DIR}/` : ''}${f.name}.${stamp}`;
@@ -583,22 +543,20 @@ export default function LabelsTab() {
       } catch (_) {}
     }
 
-    // record product snapshot with mappings
     await supabase.from('deleted_items').insert({
       kind: 'product',
       product_id: product.id,
       original_path: product.folder_path,
-      trash_path: `${TRASH_PREFIX}${product.folder_path}`, // base prefix
+      trash_path: `${TRASH_PREFIX}${product.folder_path}`,
       product_snapshot: { ...product, mappings }
     });
 
-    // delete product row
     await supabase.from('products').delete().eq('id', product.id);
     setProducts((arr) => arr.filter((p) => p.id !== product.id));
     if (selectedProductId === product.id) setSelectedProductId(null);
   }
 
-  // Restore from trash
+  // Trash modal controls
   async function openTrash() {
     setTrashOpen(true);
     const cutoff = new Date(Date.now() - 24 * 3600 * 1000).toISOString();
@@ -607,29 +565,34 @@ export default function LabelsTab() {
       .select('*')
       .gte('deleted_at', cutoff)
       .order('deleted_at', { ascending: false });
-    setRecentlyDeleted(data || []);
+    setRecentlyDeleted((data || []) as DeletedItem[]);
   }
+
   async function restoreItem(item: DeletedItem) {
     if (item.kind === 'file') {
       if (!item.original_path || !item.trash_path) return;
       try {
         await supabase.storage.from(LABELS_BUCKET).move(item.trash_path, item.original_path);
-
-        await supabase
-          .from('files')
-          .update({ is_trashed: false, trashed_at: null })
-          .eq('file_path', item.original_path);
+        await supabase.from('files').update({ is_trashed: false, trashed_at: null }).eq('file_path', item.original_path);
       } catch (_) {}
       await supabase.from('deleted_items').delete().eq('id', item.id);
     } else {
-      // product restore: reinsert product row, move all files back
+      // product restore
       const snap = item.product_snapshot || {};
       const exists = products.find((p) => p.slug === snap.slug);
-      let restoredProduct = exists;
+      let restoredProduct = exists as Product | undefined;
       if (!exists) {
         const { data: inserted } = await supabase
           .from('products')
-          .insert([{ name: snap.name, slug: snap.slug, days_out: snap.days_out, folder_path: snap.folder_path }])
+          .insert([
+            {
+              name: snap.name,
+              slug: snap.slug,
+              days_out: snap.days_out ?? null,
+              manual_expiry_date: snap.manual_expiry_date ?? null,
+              folder_path: snap.folder_path
+            }
+          ])
           .select('*')
           .single<Product>();
         if (inserted) {
@@ -637,7 +600,6 @@ export default function LabelsTab() {
           restoredProduct = inserted;
         }
       }
-      // Move back each file from mappings (if present). If not present, attempt to move by listing trash prefix.
       const mappings = (snap.mappings || []) as { from: string; to: string }[];
       if (mappings.length) {
         for (const m of mappings) {
@@ -646,21 +608,24 @@ export default function LabelsTab() {
           } catch (_) {}
         }
       } else if (snap.folder_path) {
-        // fallback: best-effort move any files under TRASH_PREFIX+folder_path back
         const root = await supabase.storage.from(LABELS_BUCKET).list(`${TRASH_PREFIX}${snap.folder_path}`, { limit: 1000 });
         for (const e of root.data || []) {
           if (!e.name.endsWith('.keep')) {
-            await supabase.storage
-              .from(LABELS_BUCKET)
-              .move(`${TRASH_PREFIX}${snap.folder_path}${e.name}`, `${snap.folder_path}${e.name}`);
+            await supabase.storage.from(LABELS_BUCKET).move(
+              `${TRASH_PREFIX}${snap.folder_path}${e.name}`,
+              `${snap.folder_path}${e.name}`
+            );
           }
         }
-        const arch = await supabase.storage.from(LABELS_BUCKET).list(`${TRASH_PREFIX}${snap.folder_path}${ARCHIVE_DIR}`, { limit: 1000 });
+        const arch = await supabase.storage
+          .from(LABELS_BUCKET)
+          .list(`${TRASH_PREFIX}${snap.folder_path}${ARCHIVE_DIR}`, { limit: 1000 });
         for (const e of arch.data || []) {
           if (!e.name.endsWith('.keep')) {
-            await supabase.storage
-              .from(LABELS_BUCKET)
-              .move(`${TRASH_PREFIX}${snap.folder_path}${ARCHIVE_DIR}/${e.name}`, `${snap.folder_path}${ARCHIVE_DIR}/${e.name}`);
+            await supabase.storage.from(LABELS_BUCKET).move(
+              `${TRASH_PREFIX}${snap.folder_path}${ARCHIVE_DIR}/${e.name}`,
+              `${snap.folder_path}${ARCHIVE_DIR}/${e.name}`
+            );
           }
         }
       }
@@ -681,7 +646,7 @@ export default function LabelsTab() {
       if (!trashOpen) return;
       const cutoff = new Date(Date.now() - 24 * 3600 * 1000).toISOString();
       const { data } = await supabase.from('deleted_items').select('*').lt('deleted_at', cutoff);
-      const expired = data || [];
+      const expired = (data || []) as DeletedItem[];
       for (const it of expired) {
         if (it.trash_path && it.kind === 'file') {
           try {
@@ -694,31 +659,55 @@ export default function LabelsTab() {
   }, [trashOpen]);
 
   // ------ Editing & Saving ------
-  function bufferValue(pid: UUID, key: 'name' | 'days_out', value: string) {
+  function bufferValue(pid: UUID, key: 'name' | 'days_out' | 'manual_expiry_date', value: string) {
     setEditBuffer((prev) => {
       const base = prev[pid] ?? {
         name: products.find((p) => p.id === pid)?.name ?? '',
-        days_out: products.find((p) => p.id === pid)?.days_out ?? 60
+        days_out: products.find((p) => p.id === pid)?.days_out ?? 60,
+        manual_expiry_date: products.find((p) => p.id === pid)?.manual_expiry_date ?? null
       };
-      const next = { ...base, [key]: key === 'days_out' ? Number(value) || 0 : value };
+      const next = {
+        ...base,
+        [key]: key === 'days_out' ? (value === '' ? null : Number(value) || 0) : (value || null)
+      } as typeof base;
+      // Mutually exclusive: if manual date set, blank out days_out; if days_out set, blank manual date
+      if (key === 'manual_expiry_date' && value) next.days_out = null;
+      if (key === 'days_out' && value !== '' && Number(value) > 0) next.manual_expiry_date = null;
       return { ...prev, [pid]: next };
     });
     setManualSaveDirty(true);
     debounceSave(pid);
   }
+
   function debounceSave(pid: UUID) {
     if (debounceTimers.current[pid]) clearTimeout(debounceTimers.current[pid]);
     debounceTimers.current[pid] = setTimeout(() => autoSave(pid), 1000);
   }
+
   async function autoSave(pid: UUID) {
     const pending = editBuffer[pid];
     if (!pending) return;
     setAutoSaving(true);
     const slug = slugify(pending.name || products.find((p) => p.id === pid)?.name || '');
     const folder_path = `${slug}/`;
+
+    const updateObj: any = {
+      name: pending.name,
+      slug,
+      folder_path,
+      manual_expiry_date: pending.manual_expiry_date
+    };
+
+    if (pending.manual_expiry_date) {
+      updateObj.days_out = null;
+    } else {
+      updateObj.days_out = Math.max(1, Math.floor((pending.days_out ?? 1)));
+      updateObj.manual_expiry_date = null;
+    }
+
     const { data: updated } = await supabase
       .from('products')
-      .update({ name: pending.name, days_out: Math.max(1, Math.floor(pending.days_out || 1)), slug, folder_path })
+      .update(updateObj)
       .eq('id', pid)
       .select('*')
       .single<Product>();
@@ -727,13 +716,14 @@ export default function LabelsTab() {
     }
     setAutoSaving(false);
   }
+
   async function saveAll() {
-    // Save every pending edit
     const ids = Object.keys(editBuffer) as UUID[];
     for (const pid of ids) {
       await autoSave(pid);
     }
     setManualSaveDirty(false);
+    addNotification('success', 'All changes saved');
   }
 
   // ------ Computed ------
@@ -742,14 +732,15 @@ export default function LabelsTab() {
     [products, selectedProductId]
   );
 
-  const nextUpdateAt = useMemo(() => {
-    if (!statusMeta?.cooldown_seconds) return null;
-    if (!statusMeta.last_run) return null;
-    const last = new Date(statusMeta.last_run);
-    return addSeconds(last, statusMeta.cooldown_seconds);
-  }, [statusMeta]);
-
   // ------ UI ------
+  if (loading) {
+    return (
+      <div className="h-full w-full flex items-center justify-center text-gray-500">
+        Loading Labels…
+      </div>
+    );
+  }
+
   return (
     <div className="h-full flex flex-col space-y-6">
       {/* ===== Header Bar (monitor + refresh + run + save + autosave tracker + trash) ===== */}
@@ -771,10 +762,19 @@ export default function LabelsTab() {
             <span className="text-sm font-medium">
               {heartbeatOk === null ? 'Checking…' : heartbeatOk ? 'System Live' : 'Offline'}
               {heartbeatAt ? (
-                <span className="text-gray-500 ml-2">• {heartbeatAt.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
+                <span className="text-gray-500 ml-2">
+                  • {heartbeatAt.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                </span>
               ) : null}
             </span>
-            <button className="ml-2 p-1 rounded hover:bg-white/10 transition" onClick={() => { pingHeartbeat(); fetchStatusMeta(); }} title="Refresh">
+            <button
+              className="ml-2 p-1 rounded hover:bg-white/10 transition"
+              onClick={() => {
+                pingHeartbeat();
+                fetchStatusMeta();
+              }}
+              title="Refresh"
+            >
               <RefreshCcw className="w-4 h-4" />
             </button>
           </div>
@@ -792,7 +792,9 @@ export default function LabelsTab() {
 
           <motion.button
             onClick={saveAll}
-            className={`glass-button px-4 py-2 rounded-lg font-quicksand font-medium flex items-center gap-2 ${manualSaveDirty ? 'text-gray-900' : 'text-gray-700'}`}
+            className={`glass-button px-4 py-2 rounded-lg font-quicksand font-medium flex items-center gap-2 ${
+              manualSaveDirty ? 'text-gray-900' : 'text-gray-700'
+            }`}
             whileHover={{ scale: 1.05 }}
             whileTap={{ scale: 0.95 }}
             title="Save all changes"
@@ -863,30 +865,6 @@ export default function LabelsTab() {
         </motion.div>
       )}
 
-      {/* Updater feedback (minimal) */}
-      <AnimatePresence>
-        {updaterStatus === 'running' && (
-          <motion.div
-            initial={{ opacity: 0, y: -8 }}
-            animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, y: -8 }}
-            className="absolute top-20 left-1/2 -translate-x-1/2 z-40 p-3 bg-yellow-50 rounded-xl text-yellow-700 shadow-lg"
-          >
-            Updating…
-          </motion.div>
-        )}
-        {updaterStatus === 'done' && (
-          <motion.div
-            initial={{ opacity: 0, y: -8 }}
-            animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, y: -8 }}
-            className="absolute top-20 left-1/2 -translate-x-1/2 z-40 p-3 bg-green-50 rounded-xl text-green-700 shadow-lg"
-          >
-            Done
-          </motion.div>
-        )}
-      </AnimatePresence>
-
       {/* ===== Content ===== */}
       {!selectedProduct && (
         <div className="flex-1 flex flex-col space-y-4 overflow-y-auto">
@@ -916,13 +894,30 @@ export default function LabelsTab() {
               const pending = editBuffer[p.id];
               const name = pending?.name ?? p.name;
               const days = pending?.days_out ?? p.days_out;
-              const expiry = computeExpiry(days);
+              const manualDateStr = (pending?.manual_expiry_date ?? p.manual_expiry_date) || null;
+
+              const isManual = !!manualDateStr;
+              const expiry = isManual
+                ? (manualDateStr ? new Date(manualDateStr) : null)
+                : (typeof days === 'number' && days > 0 ? computeExpiryFromDays(days) : null);
+
+              const today = new Date();
+              let outline = 'border-blue-300'; // auto by default
+              if (isManual) {
+                outline = expiry && expiry < today ? 'border-red-400' : 'border-green-400';
+              }
+
+              // Next Update: manual -> same as manual date; auto -> first day when rounding flips
+              const nextUpdate = isManual
+                ? (expiry || null)
+                : (typeof days === 'number' && days > 0 ? nextSwitchDateForAuto(days) : null);
+
               return (
                 <motion.div
                   key={p.id}
                   initial={{ opacity: 0, y: 6 }}
                   animate={{ opacity: 1, y: 0 }}
-                  className="rounded-2xl p-4 bg-white/50 border border-white/40 hover:shadow-xl transition cursor-pointer"
+                  className={`rounded-2xl p-4 bg-white/50 border-2 ${outline} hover:shadow-xl transition cursor-pointer`}
                   onClick={() => setSelectedProductId(p.id)}
                 >
                   <div className="flex items-start justify-between">
@@ -934,14 +929,21 @@ export default function LabelsTab() {
                       <button
                         className="p-2 rounded hover:bg-white/60"
                         title="Edit"
-                        onClick={(e) => { e.stopPropagation(); /* toggle quick edit: no modal, inline under card */ const v = (document.getElementById(`edit-${p.id}`) as HTMLDivElement); if (v) v.classList.toggle('hidden'); }}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          const v = document.getElementById(`edit-${p.id}`) as HTMLDivElement | null;
+                          if (v) v.classList.toggle('hidden');
+                        }}
                       >
                         <Pencil className="w-4 h-4 text-gray-600" />
                       </button>
                       <button
                         className="p-2 rounded hover:bg-white/60"
                         title="Delete Folder"
-                        onClick={(e) => { e.stopPropagation(); softDeleteProduct(p.id); }}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          softDeleteProduct(p.id);
+                        }}
                       >
                         <Trash2 className="w-4 h-4 text-rose-600" />
                       </button>
@@ -955,26 +957,88 @@ export default function LabelsTab() {
                     </div>
                     <div className="rounded-lg px-3 py-2 bg-white/70">
                       <div className="text-[11px] text-gray-500">Next Update</div>
-                      <div className="font-medium text-gray-800">{formatDate(nextUpdateAt)}</div>
+                      <div className="font-medium text-gray-800">{formatDate(nextUpdate)}</div>
                     </div>
                   </div>
 
                   {/* Inline quick edit (hidden by default) */}
-                  <div id={`edit-${p.id}`} className="hidden mt-3 space-y-2" onClick={(e) => e.stopPropagation()}>
-                    <input
-                      value={name}
-                      onChange={(e) => bufferValue(p.id, 'name', e.target.value)}
-                      className="w-full glass-input rounded-lg px-3 py-2 text-sm"
-                      placeholder="Name"
-                    />
-                    <input
-                      type="number"
-                      min={1}
-                      value={days}
-                      onChange={(e) => bufferValue(p.id, 'days_out', e.target.value)}
-                      className="w-full glass-input rounded-lg px-3 py-2 text-sm"
-                      placeholder="Days Out"
-                    />
+                  <div
+                    id={`edit-${p.id}`}
+                    className="hidden mt-3 space-y-3"
+                    onClick={(e) => e.stopPropagation()}
+                  >
+                    {/* Mode */}
+                    <div className="flex items-center gap-4 text-sm">
+                      <label className="flex items-center gap-2">
+                        <input
+                          type="radio"
+                          name={`mode-${p.id}`}
+                          checked={!isManual}
+                          onChange={() => {
+                            // switch to auto: clear manual date, keep days
+                            bufferValue(p.id, 'manual_expiry_date', '');
+                            if (!days || days <= 0) bufferValue(p.id, 'days_out', String(p.days_out ?? 60));
+                          }}
+                        />
+                        Auto (days)
+                      </label>
+                      <label className="flex items-center gap-2">
+                        <input
+                          type="radio"
+                          name={`mode-${p.id}`}
+                          checked={isManual}
+                          onChange={() => {
+                            // switch to manual: clear days
+                            bufferValue(p.id, 'days_out', '');
+                            const todayStr = new Date().toISOString().slice(0, 10);
+                            bufferValue(p.id, 'manual_expiry_date', manualDateStr || todayStr);
+                          }}
+                        />
+                        Manual (date)
+                      </label>
+                    </div>
+
+                    {/* Name */}
+                    <div className="space-y-1">
+                      <label className="text-[11px] uppercase tracking-wide text-gray-500">Name</label>
+                      <input
+                        value={name}
+                        onChange={(e) => bufferValue(p.id, 'name', e.target.value)}
+                        className="w-full glass-input rounded-lg px-3 py-2 text-sm"
+                        placeholder="Name"
+                        title="Product display name"
+                      />
+                    </div>
+
+                    {/* Days Out (auto) */}
+                    {!isManual && (
+                      <div className="space-y-1">
+                        <label className="text-[11px] uppercase tracking-wide text-gray-500">Days Out</label>
+                        <input
+                          type="number"
+                          min={1}
+                          value={typeof days === 'number' && days > 0 ? String(days) : ''}
+                          onChange={(e) => bufferValue(p.id, 'days_out', e.target.value)}
+                          className="w-full glass-input rounded-lg px-3 py-2 text-sm"
+                          placeholder="e.g., 60"
+                          title="Number of days to add before rounding to 1st/15th"
+                        />
+                      </div>
+                    )}
+
+                    {/* Manual Date (manual) */}
+                    {isManual && (
+                      <div className="space-y-1">
+                        <label className="text-[11px] uppercase tracking-wide text-gray-500">Manual Expiry Date</label>
+                        <input
+                          type="date"
+                          value={manualDateStr ?? ''}
+                          onChange={(e) => bufferValue(p.id, 'manual_expiry_date', e.target.value)}
+                          className="w-full glass-input rounded-lg px-3 py-2 text-sm"
+                          title="Select a fixed expiration date"
+                        />
+                      </div>
+                    )}
                   </div>
                 </motion.div>
               );
@@ -985,15 +1049,11 @@ export default function LabelsTab() {
 
       {/* ===== Folder View ===== */}
       {selectedProduct && (
-        <div className="flex-1 flex flex-col space-y-4 overflow-y-auto">
+        <div className="flex-1 flex flex-col space-y-4 overflow-y-auto" onDrop={onDrop} onDragOver={onDragOver}>
           {/* Folder header */}
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-2">
-              <button
-                className="p-2 rounded hover:bg-white/50"
-                title="Back"
-                onClick={() => setSelectedProductId(null)}
-              >
+              <button className="p-2 rounded hover:bg-white/50" title="Back" onClick={() => setSelectedProductId(null)}>
                 <ChevronLeft className="w-5 h-5 text-gray-700" />
               </button>
               <div className="flex items-center gap-2">
@@ -1003,7 +1063,6 @@ export default function LabelsTab() {
                 </div>
               </div>
             </div>
-
             <div className="flex items-center gap-2">
               <input
                 ref={uploaderRef}
@@ -1035,11 +1094,13 @@ export default function LabelsTab() {
             </div>
           </div>
 
-          {/* Archive subfolder tile */}
+          {/* Archive subfolder tile + files */}
           <div className="grid md:grid-cols-3 gap-3">
             {/* Archive card */}
             <div
-              className={`rounded-2xl p-4 bg-white/50 border border-white/40 ${!isAdmin ? 'opacity-90' : 'hover:shadow-lg'} transition`}
+              className={`rounded-2xl p-4 bg-white/50 border border-white/40 ${
+                !isAdmin ? 'opacity-90' : 'hover:shadow-lg'
+              } transition`}
             >
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-2">
@@ -1060,7 +1121,8 @@ export default function LabelsTab() {
                   initial={{ opacity: 0, y: 10 }}
                   animate={{ opacity: 1, y: 0 }}
                   transition={{ delay: idx * 0.05 }}
-                  className="rounded-2xl p-4 bg-white/50 border border-white/40 hover:shadow-lg transition">
+                  className="rounded-2xl p-4 bg-white/50 border border-white/40 hover:shadow-lg transition"
+                >
                   <div className="flex items-start justify-between gap-2">
                     <div className="flex items-center gap-2">
                       <FileText className="w-4 h-4 text-gray-600" />
@@ -1070,35 +1132,45 @@ export default function LabelsTab() {
                       <div className="text-[10px] px-2 py-1 rounded bg-gray-900/10 text-gray-600">ARCHIVE</div>
                     ) : null}
                   </div>
-
                   <div className="mt-3 flex items-center gap-2">
-                    <button className="px-3 py-2 rounded-lg hover:bg-white/10 transition text-sm flex items-center gap-2" onClick={() => openFile(f)} title="Open">
-                      <Eye className="w-4 h-4" />
-                      Open
+                    <button
+                      className="px-3 py-2 rounded-lg hover:bg-white/10 transition text-sm flex items-center gap-2"
+                      onClick={() => openFile(f)}
+                      title="Open"
+                    >
+                      <Eye className="w-4 h-4" /> Open
                     </button>
-                    <button className="px-3 py-2 rounded-lg hover:bg-white/10 transition text-sm flex items-center gap-2" onClick={() => printFile(f)} title="Print">
-                      <Printer className="w-4 h-4" />
-                      Print
+                    <button
+                      className="px-3 py-2 rounded-lg hover:bg-white/10 transition text-sm flex items-center gap-2"
+                      onClick={() => printFile(f)}
+                      title="Print"
+                    >
+                      <Printer className="w-4 h-4" /> Print
                     </button>
                     {!f.isArchive && (
                       <>
-                        <button className="px-3 py-2 rounded-lg hover:bg-white/10 transition text-sm flex items-center gap-2" onClick={() => moveToArchive(f)} title="Archive">
-                          <MoveRight className="w-4 h-4" />
-                          Archive
+                        <button
+                          className="px-3 py-2 rounded-lg hover:bg-white/10 transition text-sm flex items-center gap-2"
+                          onClick={() => moveToArchive(f)}
+                          title="Archive"
+                        >
+                          <MoveRight className="w-4 h-4" /> Archive
                         </button>
-                        <button className="px-3 py-2 rounded-lg hover:bg-white/10 transition text-sm flex items-center gap-2" onClick={() => softDeleteFile(f)} title="Delete">
-                          <Trash2 className="w-4 h-4 text-rose-600" />
-                          Delete
+                        <button
+                          className="px-3 py-2 rounded-lg hover:bg-white/10 transition text-sm flex items-center gap-2"
+                          onClick={() => softDeleteFile(f)}
+                          title="Delete"
+                        >
+                          <Trash2 className="w-4 h-4 text-rose-600" /> Delete
                         </button>
                       </>
                     )}
                   </div>
                 </motion.div>
               ))}
-
           </div>
 
-          {/* Empty state - centered below */}
+          {/* Empty state */}
           {files.filter((f) => (f.isArchive ? isAdmin : true)).length === 0 && (
             <div className="flex items-center justify-center py-16">
               <div className="rounded-2xl p-12 bg-white/30 border border-white/30 text-center max-w-md">
@@ -1111,7 +1183,7 @@ export default function LabelsTab() {
         </div>
       )}
 
-      {/* ===== Preview Modal (blur background) ===== */}
+      {/* ===== Preview Modal ===== */}
       <AnimatePresence>
         {previewOpen && previewFile && (
           <motion.div
@@ -1120,10 +1192,13 @@ export default function LabelsTab() {
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
           >
-            {/* Backdrop */}
-            <div className="absolute inset-0 bg-black/30 backdrop-blur-sm" onClick={() => { setPreviewOpen(false); setPreviewFile(null); }} />
-
-            {/* Modal */}
+            <div
+              className="absolute inset-0 bg-black/30 backdrop-blur-sm"
+              onClick={() => {
+                setPreviewOpen(false);
+                setPreviewFile(null);
+              }}
+            />
             <motion.div
               initial={{ scale: 0.95, opacity: 0 }}
               animate={{ scale: 1, opacity: 1 }}
@@ -1136,13 +1211,18 @@ export default function LabelsTab() {
               <div className="absolute top-2 right-2 flex items-center gap-2">
                 <button
                   className="px-3 py-2 rounded-lg bg-white/80 hover:bg-white text-sm shadow"
-                  onClick={() => { if (previewFile) printFile(previewFile); }}
+                  onClick={() => {
+                    if (previewFile) printFile(previewFile);
+                  }}
                 >
                   Print
                 </button>
                 <button
                   className="px-3 py-2 rounded-lg bg-white/80 hover:bg-white text-sm shadow"
-                  onClick={() => { setPreviewOpen(false); setPreviewFile(null); }}
+                  onClick={() => {
+                    setPreviewOpen(false);
+                    setPreviewFile(null);
+                  }}
                 >
                   Close
                 </button>
@@ -1152,7 +1232,7 @@ export default function LabelsTab() {
         )}
       </AnimatePresence>
 
-      {/* Trash Modal */}
+      {/* ===== Trash Modal ===== */}
       <AnimatePresence>
         {trashOpen && (
           <motion.div
@@ -1176,21 +1256,21 @@ export default function LabelsTab() {
                   Close
                 </button>
               </div>
-
               <div className="grid sm:grid-cols-2 gap-3">
                 {recentlyDeleted.length === 0 ? (
                   <div className="text-gray-500 text-sm">Empty</div>
                 ) : (
                   recentlyDeleted.map((it) => (
                     <div key={it.id} className="rounded-xl p-4 bg-white/60 border border-gray-200">
-                      <div className="text-sm text-gray-700">
-                        {it.kind === 'file' ? 'File' : 'Folder'}
-                      </div>
+                      <div className="text-sm text-gray-700">{it.kind === 'file' ? 'File' : 'Folder'}</div>
                       <div className="text-xs text-gray-500 truncate mt-1">
-                        {it.kind === 'file' ? (it.original_path || '') : (it.product_snapshot?.folder_path || '')}
+                        {it.kind === 'file' ? it.original_path || '' : it.product_snapshot?.folder_path || ''}
                       </div>
                       <div className="mt-3 flex items-center gap-2">
-                        <button className="px-3 py-2 rounded-lg bg-emerald-50 hover:bg-emerald-100 text-emerald-700 text-sm" onClick={() => restoreItem(it)}>
+                        <button
+                          className="px-3 py-2 rounded-lg bg-emerald-50 hover:bg-emerald-100 text-emerald-700 text-sm"
+                          onClick={() => restoreItem(it)}
+                        >
                           Restore
                         </button>
                       </div>
@@ -1203,15 +1283,11 @@ export default function LabelsTab() {
         )}
       </AnimatePresence>
 
-      {/* Notification System - Top Right */}
+      {/* ===== Notification System - Top Right ===== */}
       <div className="fixed top-32 right-4 z-50 flex flex-col gap-3 max-w-md w-96 pointer-events-none">
         <AnimatePresence initial={false}>
           {notifications.map((notification) => (
-            <NotificationToast
-              key={notification.id}
-              notification={notification}
-              onRemove={removeNotification}
-            />
+            <NotificationToast key={notification.id} notification={notification} onRemove={removeNotification} />
           ))}
         </AnimatePresence>
       </div>
@@ -1219,7 +1295,14 @@ export default function LabelsTab() {
   );
 }
 
-function NotificationToast({ notification, onRemove }: { notification: Notification; onRemove: (id: string) => void }) {
+// ===== Toast =====
+function NotificationToast({
+  notification,
+  onRemove
+}: {
+  notification: Notification;
+  onRemove: (id: string) => void;
+}) {
   const [progress, setProgress] = useState(100);
   const duration = notification.duration || 5000;
 
@@ -1229,26 +1312,23 @@ function NotificationToast({ notification, onRemove }: { notification: Notificat
       const elapsed = Date.now() - startTime;
       const remaining = Math.max(0, 100 - (elapsed / duration) * 100);
       setProgress(remaining);
-
       if (remaining === 0) {
         clearInterval(interval);
         onRemove(notification.id);
       }
     }, 50);
-
     return () => clearInterval(interval);
   }, [notification.id, duration, onRemove]);
 
-  const colors = {
+  const colors: Record<Notification['type'], string> = {
     success: 'bg-green-50 border-green-200 text-green-800',
     error: 'bg-red-50 border-red-200 text-red-800',
-    info: 'bg-blue-50 border-blue-200 text-blue-800',
+    info: 'bg-blue-50 border-blue-200 text-blue-800'
   };
-
-  const progressColors = {
+  const progressColors: Record<Notification['type'], string> = {
     success: 'bg-green-500',
     error: 'bg-red-500',
-    info: 'bg-blue-500',
+    info: 'bg-blue-500'
   };
 
   return (
@@ -1256,11 +1336,7 @@ function NotificationToast({ notification, onRemove }: { notification: Notificat
       initial={{ x: 400, opacity: 0 }}
       animate={{ x: 0, opacity: 1 }}
       exit={{ x: 400, opacity: 0 }}
-      transition={{
-        type: 'tween',
-        duration: 0.3,
-        ease: 'easeOut'
-      }}
+      transition={{ type: 'tween', duration: 0.3, ease: 'easeOut' }}
       className={`relative rounded-lg border shadow-lg overflow-hidden pointer-events-auto ${colors[notification.type]}`}
     >
       <div className="p-4 pr-10">
@@ -1269,6 +1345,7 @@ function NotificationToast({ notification, onRemove }: { notification: Notificat
       <button
         onClick={() => onRemove(notification.id)}
         className="absolute top-2 right-2 p-1 rounded hover:bg-black/10 transition pointer-events-auto"
+        title="Dismiss"
       >
         <X className="w-4 h-4" />
       </button>
