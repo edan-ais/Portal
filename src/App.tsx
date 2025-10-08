@@ -1,5 +1,7 @@
 import { useState, useEffect } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
+import { AuthProvider, useAuth } from './contexts/AuthContext';
+import AuthForm from './components/AuthForm';
 import TopBar from './components/TopBar';
 import BottomBar from './components/BottomBar';
 import Sidebar, { TabItem, tabIconMap } from './components/Sidebar';
@@ -27,7 +29,7 @@ const defaultTabs: TabItem[] = [
   { id: 'accounting', label: 'Accounting', icon: tabIconMap.accounting },
 ];
 
-function App() {
+function PortalContent() {
   const [activeTab, setActiveTab] = useState('home');
   const [tabs, setTabs] = useState<TabItem[]>(defaultTabs);
   const [showNotifications, setShowNotifications] = useState(false);
@@ -110,6 +112,35 @@ function App() {
       </main>
       <BottomBar />
     </div>
+  );
+}
+
+function AppContent() {
+  const { user, loading } = useAuth();
+
+  if (loading) {
+    return (
+      <div className="h-screen bg-gray-50 flex items-center justify-center">
+        <div className="text-center">
+          <div className="inline-block animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600"></div>
+          <p className="mt-4 text-gray-600">Loading...</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (!user) {
+    return <AuthForm onSuccess={() => {}} />;
+  }
+
+  return <PortalContent />;
+}
+
+function App() {
+  return (
+    <AuthProvider>
+      <AppContent />
+    </AuthProvider>
   );
 }
 

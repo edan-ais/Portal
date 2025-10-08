@@ -6,7 +6,7 @@
   causing all uploads to fail with "new row violates row-level security policy".
 
   ## Solution
-  Add RLS policies to allow PUBLIC access (since the app has no authentication):
+  Add RLS policies to allow authenticated users to:
   - Upload files (INSERT)
   - View files (SELECT)
   - Update files (UPDATE)
@@ -18,9 +18,9 @@
   3. Click "Run"
   4. Try uploading files again - they should work!
 
-  ## Security Note
-  These policies allow public access because your app doesn't have authentication.
-  If you add authentication later, you should update these policies.
+  ## Security
+  These policies require users to be logged in (authenticated).
+  Only authenticated users can upload, view, update, and delete files.
 */
 
 -- =============================================================================
@@ -37,33 +37,33 @@ DROP POLICY IF EXISTS "Authenticated users can view files" ON storage.objects;
 DROP POLICY IF EXISTS "Authenticated users can update files" ON storage.objects;
 DROP POLICY IF EXISTS "Authenticated users can delete files" ON storage.objects;
 
--- Allow public access to upload files to the labels bucket
-CREATE POLICY "Public can upload files"
+-- Allow authenticated users to upload files to the labels bucket
+CREATE POLICY "Authenticated users can upload files"
 ON storage.objects
 FOR INSERT
-TO public
+TO authenticated
 WITH CHECK (bucket_id = 'labels');
 
--- Allow public access to view files in the labels bucket
-CREATE POLICY "Public can view files"
+-- Allow authenticated users to view files in the labels bucket
+CREATE POLICY "Authenticated users can view files"
 ON storage.objects
 FOR SELECT
-TO public
+TO authenticated
 USING (bucket_id = 'labels');
 
--- Allow public access to update files in the labels bucket
-CREATE POLICY "Public can update files"
+-- Allow authenticated users to update files in the labels bucket
+CREATE POLICY "Authenticated users can update files"
 ON storage.objects
 FOR UPDATE
-TO public
+TO authenticated
 USING (bucket_id = 'labels')
 WITH CHECK (bucket_id = 'labels');
 
--- Allow public access to delete files in the labels bucket
-CREATE POLICY "Public can delete files"
+-- Allow authenticated users to delete files in the labels bucket
+CREATE POLICY "Authenticated users can delete files"
 ON storage.objects
 FOR DELETE
-TO public
+TO authenticated
 USING (bucket_id = 'labels');
 
 -- =============================================================================
