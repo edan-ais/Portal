@@ -184,15 +184,18 @@ export default function LabelsTab() {
       setIsAdmin(admin);
 
       try {
-        const { data: buckets } = await supabase.storage.listBuckets();
-        const labelsBucket = buckets?.find((b: any) => b.name === LABELS_BUCKET);
-        if (!labelsBucket) {
-          console.warn('[Labels] Labels bucket not found. Please create it in Supabase Dashboard.');
+        const { error: bucketError } = await supabase.storage.from(LABELS_BUCKET).list('', { limit: 1 });
+        if (bucketError) {
+          if (bucketError.message.includes('not found')) {
+            console.warn('[Labels] Labels bucket does not exist. Please create it in Supabase Dashboard.');
+          } else {
+            console.error('[Labels] Storage access error:', bucketError.message);
+          }
         } else {
           console.log('[Labels] Labels bucket found and ready');
         }
       } catch (e) {
-        console.error('[Labels] Error checking buckets:', e);
+        console.error('[Labels] Error checking bucket:', e);
       }
 
       // Products
@@ -752,7 +755,7 @@ export default function LabelsTab() {
   }
 
   return (
-    <div className="relative h-full w-full flex flex-col space-y-6 overflow-auto">
+    <div className="relative h-full w-full flex flex-col space-y-6 overflow-hidden p-6">
       {/* ===== Header Bar (monitor + refresh + run + save + autosave tracker + trash) ===== */}
       <div className="flex items-center justify-between">
         {/* Left: Title */}

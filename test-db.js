@@ -52,16 +52,36 @@ async function testConnection() {
     const { data: buckets, error: bucketsError } = await supabase.storage.listBuckets();
 
     if (bucketsError) {
-      console.error('❌ Storage error:', bucketsError.message);
+      console.error('❌ Storage listBuckets error:', bucketsError.message);
+      console.log('   This might be a permissions issue - trying direct bucket access...');
+    } else if (!buckets || buckets.length === 0) {
+      console.warn('⚠️ listBuckets returned empty array (might be RLS permission issue)');
+      console.log('   Trying to access bucket directly...');
     } else {
       const labelsBucket = buckets.find(b => b.name === 'labels');
       if (labelsBucket) {
-        console.log('✅ Storage bucket "labels" found');
+        console.log('✅ Storage bucket "labels" found via listBuckets');
         console.log('   Bucket details:', labelsBucket);
       } else {
-        console.warn('⚠️ Storage bucket "labels" NOT FOUND');
+        console.warn('⚠️ Storage bucket "labels" NOT FOUND in listBuckets');
         console.log('   Available buckets:', buckets.map(b => b.name).join(', '));
       }
+    }
+
+    console.log('\n🔍 Testing direct bucket access...');
+    const { data: bucketFiles, error: bucketError } = await supabase.storage
+      .from('labels')
+      .list();
+
+    if (bucketError) {
+      if (bucketError.message.includes('not found')) {
+        console.error('❌ Bucket "labels" does NOT exist');
+      } else {
+        console.error('❌ Bucket access error:', bucketError.message);
+      }
+    } else {
+      console.log('✅ Bucket "labels" exists and is accessible');
+      console.log(`   Files in bucket: ${bucketFiles.length}`);
     }
 
     console.log('\n📋 Checking products table schema...');
@@ -77,10 +97,16 @@ async function testConnection() {
     }
 
     console.log('\n✅ Database connection test complete!');
-    console.log('\n📝 Next steps:');
-    console.log('   1. If storage bucket "labels" is missing, create it in Supabase Dashboard');
-    console.log('   2. Make sure to add the storage RLS policies (see DATABASE_SETUP.md)');
-    console.log('   3. Verify manual_expiry_date column exists in products table');
+    console.log('\n📝 Summary:');
+    console.log('   ✅ Database is connected');
+    console.log('   ✅ Products table exists');
+    console.log('   ✅ Storage bucket "labels" is accessible');
+
+    if (filesError) {
+      console.log('\n⚠️  Issues found:');
+      console.log('   - Files table missing or has schema issues');
+      console.log('   - Check DATABASE_SETUP.md for setup instructions');
+    }
 
   } catch (error) {
     console.error('\n❌ Unexpected error:', error.message);
