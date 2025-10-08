@@ -888,7 +888,7 @@ async function addFolderSubmit(name: string, mode: 'auto' | 'manual', value: str
           </div>
 
           {/* Grid of product folder cards */}
-          <div className="grid sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
+          <div className="grid sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6">
             {products.map((p) => {
               const pending = editBuffer[p.id];
               const name = pending?.name ?? p.name;
@@ -926,16 +926,15 @@ async function addFolderSubmit(name: string, mode: 'auto' | 'manual', value: str
                     </div>
                     <div className="flex items-center gap-1">
                       <button
-                        className="p-2 rounded hover:bg-white/60"
-                        title="Edit"
-                        onClick={(e) => {
-  e.stopPropagation();
-  setSelectedProductId(selectedProductId === p.id ? null : p.id);
-}}
-
-                      >
-                        <Pencil className="w-4 h-4 text-gray-600" />
-                      </button>
+  className="p-2 rounded hover:bg-white/60"
+  title="Edit"
+  onClick={(e) => {
+    e.stopPropagation();
+    setSelectedProductId(p.id);
+  }}
+>
+  <Pencil className="w-4 h-4 text-gray-600" />
+</button>
                       <button
                         className="p-2 rounded hover:bg-white/60"
                         title="Delete Folder"
@@ -1284,55 +1283,7 @@ async function addFolderSubmit(name: string, mode: 'auto' | 'manual', value: str
         )}
       </AnimatePresence>
 
-      {/* ===== Notification System - Top Right ===== */}
-      <div className="fixed top-32 right-4 z-50 flex flex-col gap-3 max-w-md w-96 pointer-events-none">
-        <AnimatePresence initial={false}>
-          {notifications.map((notification) => (
-            <NotificationToast key={notification.id} notification={notification} onRemove={removeNotification} />
-          ))}
-        </AnimatePresence>
-      </div>
-    </div>
-  );
-}
-
-// ===== Toast =====
-function NotificationToast({
-  notification,
-  onRemove
-}: {
-  notification: Notification;
-  onRemove: (id: string) => void;
-}) {
-  const [progress, setProgress] = useState(100);
-  const duration = notification.duration || 5000;
-
-  useEffect(() => {
-    const startTime = Date.now();
-    const interval = setInterval(() => {
-      const elapsed = Date.now() - startTime;
-      const remaining = Math.max(0, 100 - (elapsed / duration) * 100);
-      setProgress(remaining);
-      if (remaining === 0) {
-        clearInterval(interval);
-        onRemove(notification.id);
-      }
-    }, 50);
-    return () => clearInterval(interval);
-  }, [notification.id, duration, onRemove]);
-
-  const colors: Record<Notification['type'], string> = {
-    success: 'bg-green-50 border-green-200 text-green-800',
-    error: 'bg-red-50 border-red-200 text-red-800',
-    info: 'bg-blue-50 border-blue-200 text-blue-800'
-  };
-  const progressColors: Record<Notification['type'], string> = {
-    success: 'bg-green-500',
-    error: 'bg-red-500',
-    info: 'bg-blue-500'
-  };
-
-  {/* ===== Add Folder Modal ===== */}
+      {/* ===== Add Folder Modal ===== */}
 <AnimatePresence>
   {showAddModal && (
     <motion.div
@@ -1402,6 +1353,54 @@ function NotificationToast({
     </motion.div>
   )}
 </AnimatePresence>
+
+      {/* ===== Notification System - Top Right ===== */}
+      <div className="fixed top-32 right-4 z-50 flex flex-col gap-3 max-w-md w-96 pointer-events-none">
+        <AnimatePresence initial={false}>
+          {notifications.map((notification) => (
+            <NotificationToast key={notification.id} notification={notification} onRemove={removeNotification} />
+          ))}
+        </AnimatePresence>
+      </div>
+    </div>
+  );
+}
+
+// ===== Toast =====
+function NotificationToast({
+  notification,
+  onRemove
+}: {
+  notification: Notification;
+  onRemove: (id: string) => void;
+}) {
+  const [progress, setProgress] = useState(100);
+  const duration = notification.duration || 5000;
+
+  useEffect(() => {
+    const startTime = Date.now();
+    const interval = setInterval(() => {
+      const elapsed = Date.now() - startTime;
+      const remaining = Math.max(0, 100 - (elapsed / duration) * 100);
+      setProgress(remaining);
+      if (remaining === 0) {
+        clearInterval(interval);
+        onRemove(notification.id);
+      }
+    }, 50);
+    return () => clearInterval(interval);
+  }, [notification.id, duration, onRemove]);
+
+  const colors: Record<Notification['type'], string> = {
+    success: 'bg-green-50 border-green-200 text-green-800',
+    error: 'bg-red-50 border-red-200 text-red-800',
+    info: 'bg-blue-50 border-blue-200 text-blue-800'
+  };
+  const progressColors: Record<Notification['type'], string> = {
+    success: 'bg-green-500',
+    error: 'bg-red-500',
+    info: 'bg-blue-500'
+  };
 
   return (
     <motion.div
