@@ -752,7 +752,7 @@ export default function LabelsTab() {
   }
 
   return (
-    <div className="relative h-full flex flex-col space-y-6 overflow-hidden">
+    <div className="relative h-full w-full flex flex-col space-y-6 overflow-auto">
       {/* ===== Header Bar (monitor + refresh + run + save + autosave tracker + trash) ===== */}
       <div className="flex items-center justify-between">
         {/* Left: Title */}
