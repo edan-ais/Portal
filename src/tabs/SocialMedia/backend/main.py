@@ -35,7 +35,6 @@ def now_iso() -> str:
 
 # ---------- DB & Storage helpers ----------
 def sb_list_incoming_files() -> List[dict]:
-    # Prefer DB view: files (not trashed) with file_path like 'incoming/%'
     res = sb.table("files") \
         .select("id,name,file_path,created_at,mime_type,file_size") \
         .like("file_path", "incoming/%") \
@@ -49,7 +48,7 @@ def sb_storage_download_to(path: str, local_path: str):
     with open(local_path, "wb") as f:
         f.write(data)
 
-def sb_storage_upload_from(local_path: str, dest_path: str, content_type: Optional[str] = None):
+def sb_storage_upload_from(local_path: str, dest_path: str, content_type=None):
     with open(local_path, "rb") as f:
         sb.storage.from_(SOCIAL_BUCKET).upload(
             dest_path,
@@ -58,7 +57,6 @@ def sb_storage_upload_from(local_path: str, dest_path: str, content_type: Option
         )
 
 def sb_storage_move(from_path: str, to_path: str):
-    # Ensure unique dest (avoid collision)
     try:
         sb.storage.from_(SOCIAL_BUCKET).move(from_path, to_path)
     except Exception:
@@ -101,40 +99,33 @@ def run_build_pipeline():
     try:
         incoming_rows = sb_list_incoming_files()
         if not incoming_rows:
-            # Nothing to do
             return
 
-        # Download all to temp dir
         with TmpDir(WORK_DIR) as tmp:
             local_entries = []
             for r in incoming_rows:
-                src = r["file_path"]  # e.g., "incoming/clip.mp4"
+                src = r["file_path"]
                 local_path = os.path.join(tmp, os.path.basename(src))
                 sb_storage_download_to(src, local_path)
                 local_entries.append({"row": r, "local": local_path})
 
-            # Build montage file
             output_local = build_montage_for_paths([e["local"] for e in local_entries])
 
-            # Upload output
             ts = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
             out_name = f"montage_output_{ts}.mp4"
             out_remote = f"outputs/{out_name}"
             sb_storage_upload_from(output_local, out_remote, content_type="video/mp4")
 
-            # Archive inputs
             archived_paths = []
             for e in local_entries:
-                src = e["row"]["file_path"]     # incoming/xxx
+                src = e["row"]["file_path"]
                 base = os.path.basename(src)
                 dest = f"archive/{base}.{ts}"
                 sb_storage_move(src, dest)
                 archived_paths.append(dest)
 
-            # Update DB file_paths for archived inputs
             sb_update_file_paths([e["row"] for e in local_entries], archived_paths)
 
-            # Insert DB row for output
             out_size = os.path.getsize(output_local)
             sb_insert_output_row(out_name, out_remote, out_size, mime="video/mp4")
 
@@ -169,7 +160,6 @@ def status():
 
 @app.post("/api/run")
 def run(request: Request):
-    # optional bearer check
     if API_BEARER:
         auth = request.headers.get("authorization") or ""
         if not auth.lower().startswith("bearer ") or auth.split(" ", 1)[1].strip() != API_BEARER:
