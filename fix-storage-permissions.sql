@@ -6,7 +6,7 @@
   causing all uploads to fail with "new row violates row-level security policy".
 
   ## Solution
-  Add RLS policies to allow authenticated users to:
+  Add RLS policies to allow PUBLIC access (since the app has no authentication):
   - Upload files (INSERT)
   - View files (SELECT)
   - Update files (UPDATE)
@@ -17,6 +17,10 @@
   2. Copy and paste this entire script
   3. Click "Run"
   4. Try uploading files again - they should work!
+
+  ## Security Note
+  These policies allow public access because your app doesn't have authentication.
+  If you add authentication later, you should update these policies.
 */
 
 -- =============================================================================
@@ -24,38 +28,42 @@
 -- =============================================================================
 
 -- Drop existing policies if they exist
+DROP POLICY IF EXISTS "Public can upload files" ON storage.objects;
+DROP POLICY IF EXISTS "Public can view files" ON storage.objects;
+DROP POLICY IF EXISTS "Public can update files" ON storage.objects;
+DROP POLICY IF EXISTS "Public can delete files" ON storage.objects;
 DROP POLICY IF EXISTS "Authenticated users can upload files" ON storage.objects;
 DROP POLICY IF EXISTS "Authenticated users can view files" ON storage.objects;
 DROP POLICY IF EXISTS "Authenticated users can update files" ON storage.objects;
 DROP POLICY IF EXISTS "Authenticated users can delete files" ON storage.objects;
 
--- Allow authenticated users to upload files to the labels bucket
-CREATE POLICY "Authenticated users can upload files"
+-- Allow public access to upload files to the labels bucket
+CREATE POLICY "Public can upload files"
 ON storage.objects
 FOR INSERT
-TO authenticated
+TO public
 WITH CHECK (bucket_id = 'labels');
 
--- Allow authenticated users to view files in the labels bucket
-CREATE POLICY "Authenticated users can view files"
+-- Allow public access to view files in the labels bucket
+CREATE POLICY "Public can view files"
 ON storage.objects
 FOR SELECT
-TO authenticated
+TO public
 USING (bucket_id = 'labels');
 
--- Allow authenticated users to update files in the labels bucket
-CREATE POLICY "Authenticated users can update files"
+-- Allow public access to update files in the labels bucket
+CREATE POLICY "Public can update files"
 ON storage.objects
 FOR UPDATE
-TO authenticated
+TO public
 USING (bucket_id = 'labels')
 WITH CHECK (bucket_id = 'labels');
 
--- Allow authenticated users to delete files in the labels bucket
-CREATE POLICY "Authenticated users can delete files"
+-- Allow public access to delete files in the labels bucket
+CREATE POLICY "Public can delete files"
 ON storage.objects
 FOR DELETE
-TO authenticated
+TO public
 USING (bucket_id = 'labels');
 
 -- =============================================================================
