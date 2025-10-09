@@ -965,7 +965,7 @@ export default function SocialMediaTab() {
                 className="hidden"
                 multiple
                 onChange={(e) => handleUpload(e.target.files)}
-                accept="application/pdf,image/*,video/*"
+                accept="video/*,image/*,application/pdf,.mp4,.mov,.avi,.mkv"
                 disabled={uploading}
               />
               <motion.button
