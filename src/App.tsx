@@ -34,7 +34,11 @@ function PortalContent() {
   const [tabs, setTabs] = useState<TabItem[]>(defaultTabs);
   const [showNotifications, setShowNotifications] = useState(false);
   const [unreadCount, setUnreadCount] = useState(0);
+  const [profileMode, setProfileMode] = useState<'admin' | 'user'>(
+    (localStorage.getItem('profile_mode') as 'admin' | 'user') || 'user'
+  );
 
+  // --- Notifications Poll ---
   useEffect(() => {
     fetchUnreadCount();
     const interval = setInterval(fetchUnreadCount, 30000);
@@ -49,15 +53,19 @@ function PortalContent() {
     setUnreadCount(count || 0);
   };
 
-  const handleTabOrderChange = (newOrder: TabItem[]) => {
-    setTabs(newOrder);
-  };
+  // --- Keep Profile Mode Synced ---
+  useEffect(() => {
+    const stored = localStorage.getItem('profile_mode') as 'admin' | 'user' | null;
+    if (stored && stored !== profileMode) setProfileMode(stored);
+  }, [profileMode]);
 
+  const handleTabOrderChange = (newOrder: TabItem[]) => setTabs(newOrder);
   const handleNotificationNavigate = (tab: string) => {
     setActiveTab(tab);
     setShowNotifications(false);
   };
 
+  // --- Render Tabs ---
   const renderTab = () => {
     const tabComponents: Record<string, JSX.Element> = {
       home: <HomeTab />,
@@ -70,6 +78,14 @@ function PortalContent() {
       store: <StoreTab />,
       accounting: <AccountingTab />,
     };
+
+    // Example: restrict AccountingTab to admin only
+    if (activeTab === 'accounting' && profileMode !== 'admin')
+      return (
+        <div className="flex items-center justify-center h-full text-gray-500 font-quicksand">
+          Admin access required
+        </div>
+      );
 
     return tabComponents[activeTab] || <HomeTab />;
   };
@@ -92,6 +108,7 @@ function PortalContent() {
         onClose={() => setShowNotifications(false)}
         onNavigate={handleNotificationNavigate}
       />
+
       <main className="fixed left-64 right-0 top-16 bottom-12 overflow-hidden flex flex-col">
         <div className="flex-1 overflow-y-auto p-8">
           <div className="max-w-7xl mx-auto h-full">
@@ -110,6 +127,7 @@ function PortalContent() {
           </div>
         </div>
       </main>
+
       <BottomBar />
     </div>
   );
@@ -136,12 +154,10 @@ function AppContent() {
   return <PortalContent />;
 }
 
-function App() {
+export default function App() {
   return (
     <AuthProvider>
       <AppContent />
     </AuthProvider>
   );
 }
-
-export default App;
