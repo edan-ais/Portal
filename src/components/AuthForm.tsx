@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { motion } from 'framer-motion';
-import { LogIn, UserPlus, Mail, Lock, AlertCircle, Building2 } from 'lucide-react';
+import { LogIn, UserPlus, Mail, Lock, AlertCircle, Building2, Shield } from 'lucide-react';
 import { supabase } from '../lib/supabase';
 
 interface AuthFormProps {
@@ -12,6 +12,7 @@ export default function AuthForm({ onSuccess }: AuthFormProps) {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [name, setName] = useState('');
+  const [isAdminMode, setIsAdminMode] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
 
@@ -22,34 +23,40 @@ export default function AuthForm({ onSuccess }: AuthFormProps) {
 
     try {
       if (mode === 'signup') {
-        const { data, error: signUpError } = await supabase.auth.signUp({
+        const { error: signUpError } = await supabase.auth.signUp({
           email,
           password,
-          options: {
-            data: {
-              name: name || email.split('@')[0],
-            },
-          },
+          options: { data: { name: name || email.split('@')[0] } },
         });
-
         if (signUpError) throw signUpError;
-
-        if (data.user) {
-          onSuccess();
-        }
       } else {
-        const { error: signInError } = await supabase.auth.signInWithPassword({
-          email,
-          password,
-        });
-
+        const { error: signInError } = await supabase.auth.signInWithPassword({ email, password });
         if (signInError) throw signInError;
-        onSuccess();
       }
+
+      if (isAdminMode) localStorage.setItem('profile_mode', 'admin');
+      else localStorage.setItem('profile_mode', 'user');
+
+      onSuccess();
     } catch (err: any) {
       setError(err.message || 'An error occurred');
     } finally {
       setLoading(false);
+    }
+  };
+
+  const toggleAdminMode = () => {
+    if (isAdminMode) {
+      setIsAdminMode(false);
+      localStorage.setItem('profile_mode', 'user');
+    } else {
+      const code = prompt('Enter admin access password:');
+      if (code && code === import.meta.env.VITE_ADMIN_ACCESS_CODE) {
+        setIsAdminMode(true);
+        localStorage.setItem('profile_mode', 'admin');
+      } else if (code) {
+        alert('Invalid admin password.');
+      }
     }
   };
 
@@ -66,7 +73,7 @@ export default function AuthForm({ onSuccess }: AuthFormProps) {
               <Building2 className="w-8 h-8 text-white" />
             </div>
             <h1 className="text-3xl font-bold text-gray-900 mb-2">
-              Business Portal
+              {isAdminMode ? 'Admin Portal' : 'Business Portal'}
             </h1>
             <p className="text-gray-600">
               {mode === 'login' ? 'Welcome back!' : 'Create your account'}
@@ -82,8 +89,7 @@ export default function AuthForm({ onSuccess }: AuthFormProps) {
                   : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
               }`}
             >
-              <LogIn className="w-4 h-4 inline mr-2" />
-              Login
+              <LogIn className="w-4 h-4 inline mr-2" /> Login
             </button>
             <button
               onClick={() => setMode('signup')}
@@ -93,23 +99,20 @@ export default function AuthForm({ onSuccess }: AuthFormProps) {
                   : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
               }`}
             >
-              <UserPlus className="w-4 h-4 inline mr-2" />
-              Sign Up
+              <UserPlus className="w-4 h-4 inline mr-2" /> Sign Up
             </button>
           </div>
 
           <form onSubmit={handleSubmit} className="space-y-4">
             {mode === 'signup' && (
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-2">
-                  Full Name
-                </label>
+                <label className="block text-sm font-medium text-gray-700 mb-2">Full Name</label>
                 <div className="relative">
                   <input
                     type="text"
                     value={name}
                     onChange={(e) => setName(e.target.value)}
-                    className="w-full pl-10 pr-4 py-2.5 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all"
+                    className="w-full pl-10 pr-4 py-2.5 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
                     placeholder="John Doe"
                   />
                   <div className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400">
@@ -120,16 +123,14 @@ export default function AuthForm({ onSuccess }: AuthFormProps) {
             )}
 
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-2">
-                Email Address
-              </label>
+              <label className="block text-sm font-medium text-gray-700 mb-2">Email Address</label>
               <div className="relative">
                 <input
                   type="email"
                   value={email}
                   onChange={(e) => setEmail(e.target.value)}
                   required
-                  className="w-full pl-10 pr-4 py-2.5 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all"
+                  className="w-full pl-10 pr-4 py-2.5 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
                   placeholder="you@example.com"
                 />
                 <div className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400">
@@ -139,9 +140,7 @@ export default function AuthForm({ onSuccess }: AuthFormProps) {
             </div>
 
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-2">
-                Password
-              </label>
+              <label className="block text-sm font-medium text-gray-700 mb-2">Password</label>
               <div className="relative">
                 <input
                   type="password"
@@ -149,18 +148,13 @@ export default function AuthForm({ onSuccess }: AuthFormProps) {
                   onChange={(e) => setPassword(e.target.value)}
                   required
                   minLength={6}
-                  className="w-full pl-10 pr-4 py-2.5 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all"
+                  className="w-full pl-10 pr-4 py-2.5 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
                   placeholder="••••••••"
                 />
                 <div className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400">
                   <Lock className="w-5 h-5" />
                 </div>
               </div>
-              {mode === 'signup' && (
-                <p className="text-xs text-gray-500 mt-1">
-                  Must be at least 6 characters
-                </p>
-              )}
             </div>
 
             {error && (
@@ -169,8 +163,7 @@ export default function AuthForm({ onSuccess }: AuthFormProps) {
                 animate={{ opacity: 1, y: 0 }}
                 className="flex items-center gap-2 p-3 bg-red-50 border border-red-200 rounded-lg text-red-700 text-sm"
               >
-                <AlertCircle className="w-4 h-4 flex-shrink-0" />
-                <span>{error}</span>
+                <AlertCircle className="w-4 h-4" /> <span>{error}</span>
               </motion.div>
             )}
 
@@ -179,49 +172,17 @@ export default function AuthForm({ onSuccess }: AuthFormProps) {
               disabled={loading}
               className="w-full bg-blue-600 hover:bg-blue-700 text-white font-medium py-3 px-4 rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed shadow-md hover:shadow-lg"
             >
-              {loading ? (
-                <span className="flex items-center justify-center">
-                  <svg className="animate-spin -ml-1 mr-3 h-5 w-5 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
-                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-                  </svg>
-                  Processing...
-                </span>
-              ) : (
-                <span>
-                  {mode === 'login' ? 'Sign In' : 'Create Account'}
-                </span>
-              )}
+              {loading ? 'Processing...' : mode === 'login' ? 'Sign In' : 'Create Account'}
             </button>
           </form>
 
-          <div className="mt-6 text-center text-sm text-gray-600">
-            {mode === 'login' ? (
-              <p>
-                Don't have an account?{' '}
-                <button
-                  onClick={() => setMode('signup')}
-                  className="text-blue-600 hover:text-blue-700 font-medium"
-                >
-                  Sign up
-                </button>
-              </p>
-            ) : (
-              <p>
-                Already have an account?{' '}
-                <button
-                  onClick={() => setMode('login')}
-                  className="text-blue-600 hover:text-blue-700 font-medium"
-                >
-                  Sign in
-                </button>
-              </p>
-            )}
+          <div className="flex justify-between mt-6 text-sm text-gray-600">
+            <button onClick={toggleAdminMode} className="flex items-center gap-1 text-blue-600 hover:text-blue-700">
+              <Shield className="w-4 h-4" />
+              {isAdminMode ? 'Exit Admin Mode' : 'Admin Login'}
+            </button>
+            <span className="text-gray-400">Secure • Supabase</span>
           </div>
-        </div>
-
-        <div className="mt-6 text-center text-sm text-gray-500">
-          <p>Secure authentication powered by Supabase</p>
         </div>
       </motion.div>
     </div>
