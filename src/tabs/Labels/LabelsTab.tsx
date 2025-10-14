@@ -20,7 +20,6 @@ import {
   X,
   Download,
   UserCircle2,
-  LogOut,
   CheckCircle2,
   AlertTriangle
 } from 'lucide-react';
@@ -83,15 +82,10 @@ const LABELS_BUCKET = 'labels';
 const ARCHIVE_DIR = 'archive';
 const TRASH_PREFIX = '_trash/';
 
-// ---------- Helpers ----------
 function slugify(input: string) {
   return input.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)+/g, '');
 }
 
-/**
- * Expiration Rule: add daysOut, then snap forward to the 1st or 15th,
- * whichever is the next anchor date at/after target. If after the 15th, roll to 1st next month.
- */
 function computeExpiryFromDays(daysOut: number, now = new Date()) {
   const target = new Date(now);
   target.setDate(target.getDate() + daysOut);
@@ -108,9 +102,7 @@ function formatDate(d?: Date | null) {
   return d.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
 }
 
-// ---------- Component ----------
 export default function LabelsTab() {
-  // Global state
   const [loading, setLoading] = useState(true);
   const [heartbeatOk, setHeartbeatOk] = useState<boolean | null>(null);
   const [heartbeatAt, setHeartbeatAt] = useState<Date | null>(null);
@@ -119,14 +111,13 @@ export default function LabelsTab() {
   const [runLoading, setRunLoading] = useState(false);
 
   const [products, setProducts] = useState<Product[]>([]);
-  const [selectedProductId, setSelectedProductId] = useState<UUID | null>(null); // null => grid
-  const [editingProductId, setEditingProductId] = useState<UUID | null>(null); // isolate edit to one card
+  const [selectedProductId, setSelectedProductId] = useState<UUID | null>(null);
+  const [editingProductId, setEditingProductId] = useState<UUID | null>(null);
 
   const [isAdmin, setIsAdmin] = useState(false);
-  const [activeProfile, setActiveProfile] = useState<'user' | 'admin'>('user'); // Netflix-style toggle
+  const [activeProfile, setActiveProfile] = useState<'user' | 'admin'>('user');
   const [profileSwitchOpen, setProfileSwitchOpen] = useState(false);
 
-  // Edits + saving
   const [editBuffer, setEditBuffer] = useState<Record<
     UUID,
     { name: string; days_out: number | null; manual_expiry_date: string | null }
@@ -135,63 +126,52 @@ export default function LabelsTab() {
   const [manualSaveDirty, setManualSaveDirty] = useState(false);
   const debounceTimers = useRef<Record<UUID, any>>({});
 
-  // Files in current folder
   const [files, setFiles] = useState<FileItem[]>([]);
   const uploaderRef = useRef<HTMLInputElement | null>(null);
   const [uploading, setUploading] = useState(false);
 
-  // Debug
   const [showDebug, setShowDebug] = useState(false);
 
-  // Notification system
   const [notifications, setNotifications] = useState<Notification[]>([]);
   const [showSaved, setShowSaved] = useState(false);
 
-  // Preview modal
   const [previewOpen, setPreviewOpen] = useState(false);
   const [previewFile, setPreviewFile] = useState<FileItem | null>(null);
 
-  // Trash modal
   const [trashOpen, setTrashOpen] = useState(false);
   const [recentlyDeleted, setRecentlyDeleted] = useState<DeletedItem[]>([]);
 
-  // Notification helpers (ALWAYS add; Save toasts always appear)
   const addNotification = (type: 'success' | 'error' | 'info', message: string, duration = 5000, big = false) => {
     const id = `${Date.now()}-${Math.random()}`;
     const created_at = new Date().toISOString();
     const n: Notification = { id, type, message, duration, big, created_at };
     setNotifications((prev) => [...prev, n]);
-
-    // Persist "Big Notifications" for later display + email flag
     if (big) {
       try {
         const queue = JSON.parse(localStorage.getItem('big_notifications') || '[]');
         queue.push(n);
         localStorage.setItem('big_notifications', JSON.stringify(queue));
-        // Also write to DB notifications (an email trigger can be hooked on backend)
         supabase.from('notifications').insert({
           title: 'Labels',
           message,
-          type: type.toUpperCase(), // e.g., SUCCESS / ERROR / INFO
+          type: type.toUpperCase(),
           email_to: 'support@hubbalicious.com',
           is_big: true
         });
-      } catch (_) {}
+      } catch {}
     }
   };
   const removeNotification = (id: string) => setNotifications((prev) => prev.filter((n) => n.id !== id));
 
-  // ------ Bootstrap ------
   useEffect(() => {
     (async () => {
       setLoading(true);
-      // Admin detection
       const { data: sessionRes } = await supabase.auth.getSession();
       const user = sessionRes?.session?.user;
       let admin = false;
       let email: string | null = null;
       if (user?.email) email = user.email;
-      if (user?.app_metadata && (user.app_metadata as any)?.role === 'admin') admin = true;
+      if ((user?.app_metadata as any)?.role === 'admin') admin = true;
       else if (user?.id) {
         const { data: profile } = await supabase
           .from('profiles')
@@ -204,29 +184,23 @@ export default function LabelsTab() {
       setIsAdmin(!!admin);
       setActiveProfile(admin ? 'admin' : 'user');
 
-      // Load products
-      const { data: prod, error: prodErr } = await supabase.from('products').select('*').order('created_at', { ascending: true });
-      if (!prodErr && prod) setProducts(prod as Product[]);
+      const { data: prod } = await supabase.from('products').select('*').order('created_at', { ascending: true });
+      if (prod) setProducts(prod as Product[]);
 
-      // Uptime + status
       await checkUptimeRobot();
       await fetchStatusMeta();
 
-      // Load any persisted Big Notifications
       try {
         const queue = JSON.parse(localStorage.getItem('big_notifications') || '[]');
         if (Array.isArray(queue) && queue.length) {
-          // Show them again (they'll auto-expire visually)
           queue.slice(-5).forEach((n: Notification) => setNotifications((prev) => [...prev, n]));
         }
-      } catch (_) {}
+      } catch {}
 
       setLoading(false);
     })();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // When entering a folder, load files
   useEffect(() => {
     (async () => {
       if (!selectedProductId) {
@@ -237,13 +211,10 @@ export default function LabelsTab() {
       if (!p) return;
       await ensureProductPlaceholders(p);
       await loadFiles(p);
-      // Optional: compare dates (requires backend endpoint)
       await verifyFolderDates(p);
     })();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedProductId, products.length]);
 
-  // ------ UptimeRobot Monitor ------
   async function checkUptimeRobot() {
     try {
       setUptimeLoading(true);
@@ -258,7 +229,6 @@ export default function LabelsTab() {
       const data = await res.json();
       if (data.stat === 'ok' && data.monitors?.[0]) {
         const mon = data.monitors[0];
-        // UptimeRobot status 2=up, 9=down (see docs)
         const isUp = mon.status === 2;
         setHeartbeatOk(isUp);
         setHeartbeatAt(new Date());
@@ -266,8 +236,7 @@ export default function LabelsTab() {
       } else {
         throw new Error('Invalid UptimeRobot response');
       }
-    } catch (e) {
-      console.error('[UptimeRobot] error:', e);
+    } catch {
       setHeartbeatOk(false);
       addNotification('error', 'Failed to fetch system status', 4000, true);
     } finally {
@@ -275,7 +244,6 @@ export default function LabelsTab() {
     }
   }
 
-  // ------ Monitor & Updater ------
   async function fetchStatusMeta() {
     try {
       const url = `${import.meta.env.VITE_LABEL_UPDATER_URL}/api/status`;
@@ -283,9 +251,7 @@ export default function LabelsTab() {
       if (!res.ok) return;
       const data: UpdaterStatus = await res.json();
       setStatusMeta(data);
-    } catch {
-      /* noop */
-    }
+    } catch {}
   }
 
   async function triggerUpdater() {
@@ -298,42 +264,33 @@ export default function LabelsTab() {
       });
       if (!res.ok) throw new Error('failed to trigger updater');
       await fetchStatusMeta();
-      // refresh current folder if open
       if (selectedProductId) {
         const p = products.find((x) => x.id === selectedProductId);
         if (p) await loadFiles(p);
       }
       addNotification('success', 'Label updater started', 4000);
-    } catch (e) {
-      console.error(e);
+    } catch {
       addNotification('error', 'Failed to run label updater. Check configuration.', 6000, true);
     } finally {
       setRunLoading(false);
     }
   }
 
-  // ------ Storage helpers ------
   async function ensureProductPlaceholders(product: Product) {
     const keepMain = `${product.folder_path}.keep`;
     const keepArchive = `${product.folder_path}${ARCHIVE_DIR}/.keep`;
     try {
       const listMain = await supabase.storage.from(LABELS_BUCKET).list(product.folder_path, { limit: 1 });
       if (!listMain.data || listMain.data.length === 0) {
-        await supabase.storage.from(LABELS_BUCKET).upload(keepMain, new Blob([''], { type: 'text/plain' }), {
-          upsert: true
-        });
+        await supabase.storage.from(LABELS_BUCKET).upload(keepMain, new Blob([''], { type: 'text/plain' }), { upsert: true });
       }
-    } catch (_) {}
+    } catch {}
     try {
-      const listArc = await supabase.storage.from(LABELS_BUCKET).list(`${product.folder_path}${ARCHIVE_DIR}`, {
-        limit: 1
-      });
+      const listArc = await supabase.storage.from(LABELS_BUCKET).list(`${product.folder_path}${ARCHIVE_DIR}`, { limit: 1 });
       if (!listArc.data || listArc.data.length === 0) {
-        await supabase.storage.from(LABELS_BUCKET).upload(keepArchive, new Blob([''], { type: 'text/plain' }), {
-          upsert: true
-        });
+        await supabase.storage.from(LABELS_BUCKET).upload(keepArchive, new Blob([''], { type: 'text/plain' }), { upsert: true });
       }
-    } catch (_) {}
+    } catch {}
   }
 
   async function loadFiles(product: Product) {
@@ -343,10 +300,7 @@ export default function LabelsTab() {
       .eq('folder_id', product.id)
       .eq('is_trashed', false)
       .order('created_at', { ascending: false });
-    if (error) {
-      console.error('[Labels] Error loading files:', error);
-      return;
-    }
+    if (error) return;
     const fileItems: FileItem[] = (data || []).map((f: any) => ({
       name: f.name,
       path: f.file_path,
@@ -359,12 +313,10 @@ export default function LabelsTab() {
   }
 
   async function signUrl(path: string) {
-    const { data, error } = await supabase.storage.from(LABELS_BUCKET).createSignedUrl(path, 60 * 10);
-    if (error) return null;
+    const { data } = await supabase.storage.from(LABELS_BUCKET).createSignedUrl(path, 60 * 10);
     return data?.signedUrl || null;
   }
 
-  // ------ File actions ------
   async function openFile(file: FileItem) {
     const url = await signUrl(file.path);
     if (!url) return;
@@ -397,20 +349,16 @@ export default function LabelsTab() {
   async function renameFile(file: FileItem, newName: string) {
     const newPath = file.path.replace(/[^/]+$/, newName);
     try {
-      // move in storage
       await supabase.storage.from(LABELS_BUCKET).move(file.path, newPath);
-      // update DB
       await supabase.from('files').update({ name: newName, file_path: newPath }).eq('file_path', file.path);
       addNotification('success', `Renamed to ${newName}`, 3000);
       const p = products.find((x) => x.id === selectedProductId);
       if (p) await loadFiles(p);
-    } catch (e) {
-      console.error('[Rename] error:', e);
+    } catch {
       addNotification('error', 'Rename failed', 5000, true);
     }
   }
 
-  // Soft delete: move to TRASH_PREFIX and record in deleted_items
   async function softDeleteFile(file: FileItem) {
     const p = products.find((x) => x.id === selectedProductId);
     if (!p) return;
@@ -427,8 +375,7 @@ export default function LabelsTab() {
       });
       await loadFiles(p);
       addNotification('info', `File ${file.name} moved to trash`, 3000);
-    } catch (e) {
-      console.error('[Delete] error:', e);
+    } catch {
       addNotification('error', 'Could not delete file', 5000, true);
     }
   }
@@ -451,13 +398,11 @@ export default function LabelsTab() {
           contentType: f.type
         });
         if (uploadError) {
-          console.error('[Upload] storage error', uploadError);
           errorCount++;
           continue;
         }
         const { data: existingFile, error: queryError } = await supabase.from('files').select('id').eq('file_path', dest).maybeSingle();
         if (queryError) {
-          console.error('[Upload] query error', queryError);
           errorCount++;
           continue;
         }
@@ -493,8 +438,7 @@ export default function LabelsTab() {
 
       if (uploaderRef.current) uploaderRef.current.value = '';
       await loadFiles(p);
-    } catch (e) {
-      console.error('[Upload] unexpected error', e);
+    } catch {
       addNotification('error', 'Unexpected upload error', 6000, true);
     } finally {
       setUploading(false);
@@ -512,7 +456,6 @@ export default function LabelsTab() {
     e.stopPropagation();
   }
 
-  // ------ Add / Import ------
   const [showAddModal, setShowAddModal] = useState(false);
 
   async function addFolderSubmit(name: string, mode: 'auto' | 'manual', value: string) {
@@ -560,7 +503,6 @@ export default function LabelsTab() {
     }
   }
 
-  // ------ Trash modal controls ------
   async function openTrash() {
     setTrashOpen(true);
     const cutoff = new Date(Date.now() - 24 * 3600 * 1000).toISOString();
@@ -579,12 +521,11 @@ export default function LabelsTab() {
         await supabase.storage.from(LABELS_BUCKET).move(item.trash_path, item.original_path);
         await supabase.from('files').update({ is_trashed: false, trashed_at: null }).eq('file_path', item.original_path);
         addNotification('success', 'File restored');
-      } catch (_) {
+      } catch {
         addNotification('error', 'Restore failed', 6000, true);
       }
       await supabase.from('deleted_items').delete().eq('id', item.id);
     } else {
-      // Product restore: best-effort using snapshot
       const snap = item.product_snapshot || {};
       const exists = products.find((p) => p.slug === snap.slug);
       let restoredProduct = exists as Product | undefined;
@@ -612,13 +553,12 @@ export default function LabelsTab() {
         for (const m of mappings) {
           try {
             await supabase.storage.from(LABELS_BUCKET).move(m.to, m.from);
-          } catch (_) {}
+          } catch {}
         }
       }
       await supabase.from('deleted_items').delete().eq('id', item.id);
     }
 
-    // refresh
     if (selectedProductId) {
       const p = products.find((x) => x.id === selectedProductId);
       if (p) await loadFiles(p);
@@ -626,7 +566,6 @@ export default function LabelsTab() {
     await openTrash();
   }
 
-  // Permanently purge expired items when trash modal opens (best-effort)
   useEffect(() => {
     (async () => {
       if (!trashOpen) return;
@@ -637,14 +576,13 @@ export default function LabelsTab() {
         if (it.trash_path && it.kind === 'file') {
           try {
             await supabase.storage.from(LABELS_BUCKET).remove([it.trash_path]);
-          } catch (_) {}
+          } catch {}
         }
         await supabase.from('deleted_items').delete().eq('id', it.id);
       }
     })();
   }, [trashOpen]);
 
-  // ------ Editing & Saving ------
   function bufferValue(pid: UUID, key: 'name' | 'days_out' | 'manual_expiry_date', value: string) {
     setEditBuffer((prev) => {
       const base = prev[pid] ?? {
@@ -656,7 +594,6 @@ export default function LabelsTab() {
         ...base,
         [key]: key === 'days_out' ? (value === '' ? null : Number(value) || 0) : (value || null)
       } as typeof base;
-      // Mutually exclusive: if manual date set, blank out days_out; if days_out set, blank manual date
       if (key === 'manual_expiry_date' && value) next.days_out = null;
       if (key === 'days_out' && value !== '' && Number(value) > 0) next.manual_expiry_date = null;
       return { ...prev, [pid]: next };
@@ -667,7 +604,6 @@ export default function LabelsTab() {
 
   function debounceSave(pid: UUID) {
     if (debounceTimers.current[pid]) clearTimeout(debounceTimers.current[pid]);
-    // autosave silently but do not show toast
     debounceTimers.current[pid] = setTimeout(() => autoSave(pid), 1200);
   }
 
@@ -689,13 +625,13 @@ export default function LabelsTab() {
       updateObj.days_out = Math.max(1, Math.floor(pending.days_out ?? 1));
       updateObj.manual_expiry_date = null;
     }
-    const { data: updated, error } = await supabase
+    const { data: updated } = await supabase
       .from('products')
       .update(updateObj)
       .eq('id', pid)
       .select('*')
       .single<Product>();
-    if (!error && updated) {
+    if (updated) {
       setProducts((arr) => arr.map((p) => (p.id === pid ? updated : p)));
     }
   }
@@ -713,47 +649,76 @@ export default function LabelsTab() {
       setShowSaved(true);
       setTimeout(() => setShowSaved(false), 2000);
       addNotification('success', 'Saved successfully', 3500);
-      // Big notification that settings changed
       addNotification('info', 'Folder settings updated', 1, true);
-    } catch (e) {
-      console.error(e);
+    } catch {
       addNotification('error', 'Save failed', 6000, true);
     }
   }
 
-  // ------ Date verification (folder vs. file content/metadata) ------
   async function verifyFolderDates(product: Product) {
-    // This calls your backend verifier if available
     try {
       const url = `${import.meta.env.VITE_LABEL_UPDATER_URL}/api/verify?folder=${encodeURIComponent(product.folder_path)}`;
       const res = await fetch(url);
       if (!res.ok) return;
       const data = await res.json();
-      // Expected shape: { ok: boolean, mismatches: Array<{file:string, expected:string, found:string}> }
       if (data.ok !== true) {
-        // raise Big Notification
         const count = Array.isArray(data.mismatches) ? data.mismatches.length : 0;
-        addNotification(
-          'error',
-          `Date mismatch in ${product.name}: ${count} file(s) not updated`,
-          8000,
-          true
-        );
+        addNotification('error', `Date mismatch in ${product.name}: ${count} file(s) not updated`, 8000, true);
       } else {
         addNotification('success', `Dates validated for ${product.name}`, 2500);
       }
-    } catch (e) {
-      // Non-fatal
+    } catch {}
+  }
+
+  async function softDeleteProduct(pid: UUID) {
+    const product = products.find((p) => p.id === pid);
+    if (!product) return;
+    try {
+      const { data: fileRows } = await supabase
+        .from('files')
+        .select('file_path')
+        .eq('folder_id', pid)
+        .eq('is_trashed', false);
+      const mappings: { from: string; to: string }[] = [];
+      if (fileRows && fileRows.length) {
+        for (const r of fileRows) {
+          const from = r.file_path as string;
+          const to = `${TRASH_PREFIX}${from}.${Date.now()}`;
+          try {
+            await supabase.storage.from(LABELS_BUCKET).move(from, to);
+            mappings.push({ from, to });
+            await supabase.from('files').update({ is_trashed: true, trashed_at: new Date().toISOString() }).eq('file_path', from);
+          } catch {}
+        }
+      }
+      await supabase.from('deleted_items').insert({
+        kind: 'product',
+        product_id: pid,
+        original_path: null,
+        trash_path: null,
+        product_snapshot: {
+          name: product.name,
+          slug: product.slug,
+          days_out: product.days_out,
+          manual_expiry_date: product.manual_expiry_date,
+          folder_path: product.folder_path,
+          mappings
+        }
+      });
+      await supabase.from('products').delete().eq('id', pid);
+      setProducts((arr) => arr.filter((p) => p.id !== pid));
+      if (selectedProductId === pid) setSelectedProductId(null);
+      addNotification('info', `Folder "${product.name}" moved to trash`, 4000);
+    } catch {
+      addNotification('error', 'Could not delete folder', 6000, true);
     }
   }
 
-  // ------ Computed ------
   const selectedProduct = useMemo(
     () => (selectedProductId ? products.find((p) => p.id === selectedProductId) || null : null),
     [products, selectedProductId]
   );
 
-  // ------ UI ------
   if (loading) {
     return (
       <div className="h-full w-full flex items-center justify-center text-gray-500">
@@ -764,15 +729,11 @@ export default function LabelsTab() {
 
   return (
     <div className="relative h-full w-full flex flex-col space-y-6 overflow-hidden p-6" onDrop={onDrop} onDragOver={onDragOver}>
-      {/* ===== Header Bar ===== */}
       <div className="flex items-center justify-between">
-        {/* Left: Title */}
         <div className="flex items-center gap-3">
           <Tag className="w-8 h-8 text-gray-500" />
           <h2 className="text-3xl font-bold text-gray-800 font-quicksand">Labels</h2>
         </div>
-
-        {/* Right: Monitor + buttons + profile */}
         <div className="flex items-center gap-3">
           <motion.button
             onClick={checkUptimeRobot}
@@ -787,9 +748,7 @@ export default function LabelsTab() {
             <span className="text-sm font-medium">
               {heartbeatOk === null ? 'Checking…' : heartbeatOk ? 'System Live' : 'System Down'}
               {heartbeatAt ? (
-                <span className="text-white/80 ml-2">
-                  • {heartbeatAt.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-                </span>
+                <span className="text-white/80 ml-2">• {heartbeatAt.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
               ) : null}
             </span>
           </motion.button>
@@ -835,7 +794,6 @@ export default function LabelsTab() {
             {autoSaving ? 'Saving…' : showSaved ? 'Saved!' : 'Save'}
           </motion.button>
 
-          {/* Profile Switcher */}
           <button
             className="p-2 rounded-full bg-white/60 hover:bg-white transition"
             onClick={() => setProfileSwitchOpen(true)}
@@ -844,7 +802,6 @@ export default function LabelsTab() {
             <UserCircle2 className="w-6 h-6 text-gray-700" />
           </button>
 
-          {/* Debug toggle */}
           {isAdmin && (
             <button
               className="px-2 py-2 rounded-lg hover:bg-white/10 transition text-xs text-gray-500"
@@ -857,7 +814,6 @@ export default function LabelsTab() {
         </div>
       </div>
 
-      {/* Debug panel */}
       {showDebug && (
         <motion.div initial={{ opacity: 0, y: -10 }} animate={{ opacity: 1, y: 0 }} className="p-4 bg-gray-900 text-gray-100 rounded-xl text-xs font-mono">
           <div className="font-bold mb-2">Debug Info</div>
@@ -869,10 +825,8 @@ export default function LabelsTab() {
         </motion.div>
       )}
 
-      {/* ===== Content ===== */}
       {!selectedProduct && (
         <div className="flex-1 flex flex-col space-y-4 overflow-y-auto">
-          {/* Actions over grid */}
           <div className="flex items-center gap-2">
             <motion.button
               onClick={() => setShowAddModal(true)}
@@ -894,27 +848,33 @@ export default function LabelsTab() {
               <UploadCloud className="w-4 h-4" />
               Import Folder
             </motion.button>
+            <motion.button
+              onClick={openTrash}
+              className="px-4 py-2 rounded-lg bg-rose-600 text-white font-quicksand font-medium flex items-center gap-2"
+              whileHover={{ scale: 1.05 }}
+              whileTap={{ scale: 0.95 }}
+              title="Recently Deleted"
+            >
+              <Trash2 className="w-4 h-4" />
+              Trash
+            </motion.button>
           </div>
 
-          {/* Grid of product folder cards */}
           <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-6">
             {products.map((p) => {
               const pending = editBuffer[p.id];
               const name = pending?.name ?? p.name;
               const days = pending?.days_out ?? p.days_out;
               const manualDateStr = (pending?.manual_expiry_date ?? p.manual_expiry_date) || null;
-
               const isManual = !!manualDateStr;
-              const expiry = isManual
-                ? (manualDateStr ? new Date(manualDateStr) : null)
-                : (typeof days === 'number' && days > 0 ? computeExpiryFromDays(days) : null);
+              const expiry = isManual ? (manualDateStr ? new Date(manualDateStr) : null) : (typeof days === 'number' && days > 0 ? computeExpiryFromDays(days) : null);
 
               return (
                 <motion.div
                   key={p.id}
                   initial={{ opacity: 0, y: 6 }}
                   animate={{ opacity: 1, y: 0 }}
-                  className={`rounded-2xl p-4 bg-white/50 border-2 border-blue-200 hover:shadow-xl transition`}
+                  className="rounded-2xl p-4 bg-white/50 border-2 border-blue-200 hover:shadow-xl transition"
                 >
                   <div className="flex items-start justify-between">
                     <div className="flex items-center gap-2 whitespace-nowrap">
@@ -950,7 +910,6 @@ export default function LabelsTab() {
                     </div>
                   </div>
 
-                  {/* Inline quick edit (isolated to this card) */}
                   <div className={`${editingProductId === p.id ? 'mt-4' : 'mt-0'} space-y-3`}>
                     <AnimatePresence initial={false}>
                       {editingProductId === p.id && (
@@ -961,7 +920,6 @@ export default function LabelsTab() {
                           className="relative z-10"
                           onClick={(e) => e.stopPropagation()}
                         >
-                          {/* Mode */}
                           <div className="flex items-center gap-4 text-sm">
                             <label className="flex items-center gap-2">
                               <input
@@ -990,7 +948,6 @@ export default function LabelsTab() {
                             </label>
                           </div>
 
-                          {/* Name */}
                           <div className="space-y-1">
                             <label className="text-[11px] uppercase tracking-wide text-gray-500">Name</label>
                             <input
@@ -1002,7 +959,6 @@ export default function LabelsTab() {
                             />
                           </div>
 
-                          {/* Days Out (auto) */}
                           {!isManual && (
                             <div className="space-y-1">
                               <label className="text-[11px] uppercase tracking-wide text-gray-500">Days Out</label>
@@ -1018,7 +974,6 @@ export default function LabelsTab() {
                             </div>
                           )}
 
-                          {/* Manual Date (manual) */}
                           {isManual && (
                             <div className="space-y-1">
                               <label className="text-[11px] uppercase tracking-wide text-gray-500">Manual Expiry Date</label>
@@ -1054,10 +1009,8 @@ export default function LabelsTab() {
         </div>
       )}
 
-      {/* ===== Folder View ===== */}
       {selectedProduct && (
         <div className="flex-1 flex flex-col space-y-4 overflow-y-auto">
-          {/* Folder header */}
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-2">
               <button className="p-2 rounded bg-white/60 hover:bg-white" title="Back" onClick={() => setSelectedProductId(null)}>
@@ -1094,9 +1047,8 @@ export default function LabelsTab() {
             </div>
           </div>
 
-          {/* Archive subfolder tile (visible only; archive action removed per spec) */}
           <div className="grid md:grid-cols-3 gap-3">
-            <div className={`rounded-2xl p-4 bg-white/50 border border-white/40 transition`}>
+            <div className="rounded-2xl p-4 bg-white/50 border border-white/40 transition">
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-2">
                   <FolderArchive className="w-5 h-5 text-gray-700" />
@@ -1107,7 +1059,6 @@ export default function LabelsTab() {
               <div className="text-[11px] text-gray-500 mt-2">{isAdmin ? 'Visible (backend-managed only)' : 'Locked'}</div>
             </div>
 
-            {/* Files */}
             {files
               .filter((f) => (f.isArchive ? isAdmin : true))
               .map((f, idx) => (
@@ -1182,7 +1133,6 @@ export default function LabelsTab() {
               ))}
           </div>
 
-          {/* Empty state */}
           {files.filter((f) => (f.isArchive ? isAdmin : true)).length === 0 && (
             <div className="flex items-center justify-center py-16">
               <div className="rounded-2xl p-12 bg-white/30 border border-white/30 text-center max-w-md">
@@ -1195,7 +1145,6 @@ export default function LabelsTab() {
         </div>
       )}
 
-      {/* ===== Preview Modal (custom-styled) ===== */}
       {createPortal(
         <AnimatePresence>
           {previewOpen && previewFile && (
@@ -1247,7 +1196,6 @@ export default function LabelsTab() {
         document.body
       )}
 
-      {/* ===== Trash Modal ===== */}
       {createPortal(
         <AnimatePresence>
           {trashOpen && (
@@ -1303,7 +1251,6 @@ export default function LabelsTab() {
         document.body
       )}
 
-      {/* ===== Add Folder Modal ===== */}
       {createPortal(
         <AnimatePresence>
           {showAddModal && (
@@ -1379,7 +1326,6 @@ export default function LabelsTab() {
         document.body
       )}
 
-      {/* ===== Notification System - Top Right ===== */}
       <div className="fixed top-24 right-4 z-50 flex flex-col gap-3 max-w-md w-96 pointer-events-none">
         <AnimatePresence initial={false}>
           {notifications.map((notification) => (
@@ -1391,7 +1337,6 @@ export default function LabelsTab() {
   );
 }
 
-// ===== Toast =====
 function NotificationToast({
   notification,
   onRemove
@@ -1461,11 +1406,4 @@ function NotificationToast({
       </div>
     </motion.div>
   );
-}
-
-// ===== Helpers used in component but defined after (hoisted via function decl) =====
-async function softDeleteProduct(pid: UUID) {
-  // NOTE: Moved out of component to match earlier pattern would require access to products; but we used in-line earlier.
-  // Keeping a harmless placeholder in case of imports; real impl is in component (above) where it’s used via closure.
-  return pid;
 }
