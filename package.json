@@ -3,7 +3,7 @@
   "private": true,
   "version": "0.0.0",
   "type": "module",
-  "scripts": {
+  "scripts": { 
     "dev": "vite",
     "build": "vite build",
     "lint": "eslint .",
@@ -16,6 +16,13 @@
     "@dnd-kit/sortable": "^10.0.0",
     "@dnd-kit/utilities": "^3.2.2",
     "@supabase/supabase-js": "^2.57.4",
+    "@fullcalendar/core": "^6.1.14",
+    "@fullcalendar/react": "^6.1.14",
+    "@fullcalendar/daygrid": "^6.1.14",
+    "@fullcalendar/timegrid": "^6.1.14",
+    "@fullcalendar/interaction": "^6.1.14",
+    "clsx": "^2.1.1",
+    "date-fns": "^3.6.0",
     "dotenv": "^16.4.5",
     "framer-motion": "^12.23.22",
     "lucide-react": "^0.344.0",
